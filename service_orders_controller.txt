@@ -1,0 +1,1160 @@
+class ServiceOrdersController < ApplicationController
+  include Audited
+  before_action :set_service_order, only: [:show, :update, :destroy, :update_service_orders_services, :update_service_orders_all_services, :get_implantation, :pdf, :get_deleted, :get_edited_changes, :get_service_orders_actions, :services_remove, :get_attachments, :update_attachments, :remove_attachments, :add_comment, :delete_service_order_action, :delete_exit_return_box_document, :action_boxes, :action_documents, :services]
+  before_action :filter_user_clients, only: [:get_paginated_filtered_ordered, :xlsx_export, :grouped_by]
+  before_action :client_user_can_see, only: :show
+  before_action :authenticate_user!
+  load_and_authorize_resource
+
+  # GET /service_orders
+  def index
+    @service_orders = ServiceOrder.select("
+      service_orders.id,
+      service_orders.title,
+      service_orders.created_at,
+      service_orders.completion_date,
+      service_orders.cancel_date,
+      service_orders.status,
+      service_orders.description,
+      json_build_object('id', clients.id, 'name', clients.name) AS this_client,
+      json_build_object('id', sub_companies.id, 'name', sub_companies.name) AS this_sub_company,
+      json_build_object('id', responsibles.id, 'name', responsibles.name) AS this_responsible,
+      json_build_object('id', requesters.id, 'name', requesters.name) AS this_requester
+    ")
+    .joins("LEFT JOIN clients ON clients.id = service_orders.client_id")
+    .joins("LEFT JOIN sub_companies ON sub_companies.id = service_orders.sub_company_id")
+    .joins("LEFT JOIN users AS responsibles ON responsibles.id = service_orders.responsible_id")
+    .joins("LEFT JOIN users AS requesters ON requesters.id = service_orders.requester_id")
+
+    # if params[:search].present?
+    #   @service_orders = @service_orders.where("concat_ws(' ', service_orders.id, clients.name, sub_companies.name, service_orders.title, service_orders.created_at, responsibles.name, requesters.name) ILIKE ?", "%#{params[:search]}%")
+    # end
+
+    if params[:search].present?
+      os_id = Integer(params[:search]) rescue 0
+      if os_id > 0
+        @service_orders = @service_orders.where(:id => os_id)
+      else
+        @service_orders = @service_orders.where("concat_ws(' ', service_orders.id, clients.name, sub_companies.name, service_orders.title, service_orders.description, service_orders.note, service_orders.created_at, responsibles.name, requesters.name) ILIKE ?", "%#{params[:search]}%")
+      end
+    end
+
+    @service_orders = @service_orders.where("service_orders.title ilike ?", "%#{params[:title]}%") if params[:title].present?
+
+    @service_orders = @service_orders.where("service_orders.description ilike ?", "%#{params[:description]}%") if params[:description].present?
+
+    if params[:statuses].present?
+      statuses_array =  params[:statuses].tr('[]', '').split(',').map(&:to_i)
+      @service_orders = @service_orders.where("service_orders.status  IN (?)", statuses_array)
+    end
+
+    params[:order] = "created_at desc, id asc" unless params[:order].present?
+    @service_orders = @service_orders.order("#{params[:order]}")
+    .page(params[:page])
+    .per(params[:per_page])
+  
+    render json: {
+      service_orders: @service_orders,
+      total_pages: @service_orders.total_pages,
+      total_count: @service_orders.total_count
+    }, status: :ok
+  end
+
+  def search_os
+    service_orders = ServiceOrder.find(Integer(params[:search]) ) rescue nil
+    if service_orders.present?
+      render json: service_orders, status: :ok
+    else
+      render json: {}, status: :unprocessable_entity
+    end
+  end
+
+  # GET /service_orders/1
+  def show
+    render json: @service_order.show
+  end
+
+  # POST /service_orders
+  def create
+    @service_order = ServiceOrder.new(service_order_params)
+
+    if @service_order.save
+      render json: @service_order, status: :created, location: @service_order
+    else
+      render json: @service_order.errors, status: :unprocessable_entity
+    end
+  end
+
+  # PATCH/PUT /service_orders/1
+  def update
+    unless params[:change_completion_date].present?
+      if params[:service_order][:cancel_date].present?
+        params[:service_order][:cancel_date] = Time.current.to_s
+      elsif params[:service_order][:completion_date].present?
+       # completion_date = ServiceOrder.check_next_billing_month(@service_order.client_id)
+        params[:service_order][:completion_date] = Time.current
+      end
+    end
+
+    if params[:responsible_id].present?
+      if @service_order.status == ("canceled" && "completed" && "billed")
+        raise "service order closed"
+      end
+    end
+
+    if @service_order.update(service_order_params)
+      render json: @service_order.show
+    else
+      render json: @service_order.errors, status: :unprocessable_entity
+    end
+  end
+
+  # DELETE /service_orders/1
+  def destroy
+    @service_order.destroy
+  end
+
+  def get_paginated_filtered_ordered
+    @service_orders = ServiceOrder.get_paginated_filtered_ordered(params)
+
+    render json: @service_orders[:json], status: @service_orders[:status]
+  end
+
+  def client_by_user
+    begin
+      user = User.find(params[:requester_id])
+
+      if user[:arqcen_user] == true
+        clients = Client.select("
+          clients.id,
+          clients.name
+        ")
+        .where("clients.active IS TRUE")
+        .order("clients.name")
+        .limit(30)
+
+        render json: clients, status: :ok
+      else
+        clients = Client.select("
+          clients.id,
+          clients.name
+        ")
+        .joins("LEFT JOIN client_users ON client_users.client_id = clients.id")
+        .joins("LEFT JOIN users ON users.id = client_users.user_id")
+        .where("client_users.user_id = ?", user.id)
+        .where("clients.active IS TRUE")
+        .order("clients.name")
+
+        render json: clients, status: :ok
+      end
+    rescue ActiveRecord::RecordNotFound
+      render json: { error: "user_not_found" }, status: :not_found
+
+    rescue StandardError => e
+      render json: { error: e.message }, status: :unprocessable_entity
+    end
+  end
+
+  def user_by_client
+    users = User.select("
+      users.id,
+      users.email,
+      users.name,
+      users.arqcen_user,
+      COALESCE(json_agg(json_build_object('id', clients.id, 'name', clients.name)
+                      ORDER BY clients.name) FILTER (
+                                                      WHERE clients.id IS NOT NULL), '[]') AS this_clients
+    ")
+    .joins("LEFT JOIN client_users ON client_users.user_id = users.id AND client_users.active IS TRUE")
+    .joins("LEFT JOIN clients on clients.id = client_users.client_id")
+
+    users = users.where("(client_users.client_id = ? OR users.arqcen_user IS TRUE)", params[:client_id])
+    users = users.group("users.id")
+
+    render json: users, status: :ok
+  end
+
+  # def search_description
+  #   service_description = ServiceOrder.select("
+  #   service_orders.client_id, 
+  #   service_orders.description")
+
+  #   service_description = service_description.where("service_orders.description ILIKE ?", "%#{params[:text]}%") if params[:text].present?
+  #   service_description = service_description.limit(params[:limit]) if params[:limit].present?
+
+  #   render json: service_description, status: :ok
+  # end
+
+  def search_available_requesters
+    client_users = User.select("
+      users.id,
+      users.email,
+      users.name,
+      users.arqcen_user,
+      COALESCE(json_agg(json_build_object('id', clients.id, 'name', clients.name)
+                      ORDER BY clients.name) FILTER (
+                                                      WHERE clients.id IS NOT NULL), '[]') AS this_clients
+    ")
+    .joins("LEFT JOIN client_users ON client_users.user_id = users.id")
+    .joins("LEFT JOIN clients on clients.id = client_users.client_id")
+    .where("users.name ILIKE ?", "%#{params[:text]}%") if params[:text].present?
+
+    if params[:client_id].present?
+      client_users = client_users.where("client_users.client_id = ? OR users.arqcen_user IS TRUE", params[:client_id])
+    end
+
+    client_users = client_users.group("users.id")
+    client_users = client_users.limit(params[:limit]) if params[:limit].present?
+
+    render json: client_users, status: :ok
+  end
+
+  def sub_company_by_client
+    client = Client.find(params[:client_id])
+
+    if client.present?
+      sub_company = SubCompany.select("sub_companies.*")
+      .where("sub_companies.client_id = ?", client[:id])
+
+      render json: sub_company
+    end
+  end
+
+  def department_by_user
+    user = User.find(params[:requester_id])
+    client = Client.find(params[:client_id])
+
+    if user.present?
+      user_departments = Department.select("departments.*")
+      .joins("JOIN user_department_clients ON user_department_clients.department_id = departments.id")
+      .where("user_department_clients.user_id = ?
+ AND user_department_clients.client_id = ?", user.id, client.id)
+      .order("departments.name")
+
+      puts user_departments.inspect
+      if user_departments.exists?
+        render json: user_departments
+      else
+        render json: client.departments.order("departments.name")
+      end
+    end
+  end
+
+  def get_services_audits
+    services_audits = Audit.select("audits.id as audit_id, audits.auditable_id, audits.auditable_type, audits.action, audits.created_at, audits.audited_changes, users.id, users.name as user_name, users.email as user_email, users.image_url as image_url")
+    .joins("JOIN users ON audits.user_id = users.id")
+    .where("auditable_type = 'Service'")
+    .order("audits.created_at desc")
+
+    render json: services_audits
+  end
+
+  def add_service
+    render json: ServiceOrder.add_service(params)
+  end
+
+  def update_service_orders_all_services
+    if @service_order.status != ("canceled" && "completed" && "billed")
+      services =  params[:service_orders_services]
+      services.each do |service|
+        if service[:service_orders_service_id].present?
+          service_orders_service = @service_order.service_orders_services.find(service[:service_orders_service_id])
+          service_orders_service.update(quantity: service[:quantity]) rescue next
+        else
+          if service[:quantity].present? && service[:quantity].to_i > 0
+            service_orders_service = @service_order.service_orders_services.new(
+              name: service[:name],
+              value: service[:value],
+              quantity: service[:quantity],
+              total_value: service[:total_value],
+              service_id: service[:id]
+            )
+
+            service_orders_service.save rescue next
+          end
+        end
+      end
+    end
+
+    render json: @service_order.service_orders_services
+  end
+
+  def update_service_orders_services
+    if @service_order.status != ("canceled" && "completed" && "billed")
+      if params[:service_orders_service_id].present?
+        service_orders_service = @service_order.service_orders_services.find(params[:service_orders_service_id])
+        if service_orders_service.update(service_orders_service_params)
+          render json: service_orders_service
+        else
+          render json: service_orders_service.errors, status: :unprocessable_entity
+        end
+      else
+        service_orders_service = @service_order.service_orders_services.new(service_orders_service_params)
+
+        if service_orders_service.save
+          render json: service_orders_service
+        else
+          render json: service_orders_service.errors, status: :unprocessable_entity
+        end
+      end
+    end
+  end
+
+  def services_remove
+    if @service_order.status != ("canceled" && "completed" && "billed")
+      @service_order.service_orders_services.find(params[:service_orders_service_id]).destroy
+    end
+
+    render json: @service_order.service_orders_services
+  end
+
+  def get_attachments
+    attachments = @service_order.attachments.map{ |img| ({ image: url_for(img), size: img.blob.byte_size, name: img.blob.filename, id: img.id  }) }
+
+    render json: attachments
+  end
+
+  def qtd_pre_service_orders
+    pre_os = PreServiceOrder.select("
+      COUNT(DISTINCT pre_service_orders.id) as qtd
+    ")
+    .where(archived: false)
+
+    pre_os = pre_os[0].qtd rescue 0
+
+    render json: pre_os
+  end 
+
+  def qtd_pending_service_orders
+    pending_service = ServiceOrder.select("
+    count(1) as total_pending
+    ")
+    .where("service_orders.status = '1'")
+
+    pending_service = pending_service[0].total_pending rescue 0
+
+    render json: pending_service
+  end
+
+  def update_attachments
+    if @service_order.status != ("canceled" && "completed" && "billed")
+      attachment = @service_order.attachments.attach(params[:attachments])
+
+      if attachment
+        CustomAudit.attachment_audit_create(attachment[0], params[:id], current_user)
+        attachments =  @service_order.attachments.map{ |img| ({ image: url_for(img), size: img.blob.byte_size, name: img.blob.filename, id: img.id  }) }
+        render json: attachments, status: :ok
+      else
+        render json: @service_order.errors, status: :unprocessable_entity
+      end
+    end
+  end
+
+  def remove_attachments
+    if @service_order.status != ("canceled" && "completed" && "billed")
+      attachment = @service_order.attachments.find(params[:attachment_id])
+
+      if @service_order.present?
+        if attachment.purge
+          CustomAudit.attachment_audit_destroy(attachment, params[:id], current_user)
+          attachments =  @service_order.attachments.map{ |img| ({ image: url_for(img), size: img.blob.byte_size, name: img.blob.filename, id: img.id  }) }
+          render json: attachments, status: :ok
+        else
+          attachments =  @service_order.attachments.map{ |img| ({ image: url_for(img), size: img.blob.byte_size, name: img.blob.filename, id: img.id  }) }
+          render json: attachments, status: :ok
+        end
+      end
+    end
+  end
+
+  def get_service_orders_audits
+    audits = Audit.select("audits.id as audit_id, audits.auditable_id, audits.auditable_type, audits.action, audits.created_at, audits.audited_changes, users.id, users.name as user_name, users.email as user_email, users.image_url as image_url")
+    .joins("JOIN users ON audits.user_id = users.id")
+    .where("(audits.auditable_id = ? and auditable_type = 'ServiceOrder') or (associated_id = ?)", params[:id], params[:id])
+    .order("audits.created_at desc")
+
+    render json: audits
+  end
+
+  def add_comment
+    if @service_order.status != ("canceled" && "completed" && "billed")
+      render json: ServiceOrder.add_comment(params, current_user)
+    else
+      raise "service order closed"
+    end
+  end
+
+  def add_exit_return
+    render json: ServiceOrder.add_exit_return(params, current_user)
+  end
+
+  def get_exit_returns 
+    if params[:exit_return_type] == 'box'
+      exit_return = ServiceOrdersExitReturnsBox.select("
+        service_orders_exit_returns_boxes.id,
+        service_orders_exit_returns_boxes.service_orders_exit_return_id,
+        service_orders_exit_returns.exit_return_type,
+        service_orders_exit_returns.service_type,
+        service_orders_exit_returns.deadline,
+        array_agg(space_numbers.space_number) as space_ids,
+        array_agg(DISTINCT discarded_box_numbers.number) AS this_discarded_numbers,
+        box_types.name as box_type_name,
+        COALESCE(box_types.spaces_qty, boxes.qty_spaces, 0) AS spaces,
+        boxes.id as box_id,
+        boxes.initial_number,
+        boxes.final_number,
+        boxes.start_date,
+        boxes.end_date,
+        boxes.status,
+        shelf_columns_racks.shelf_number,
+        shelf_columns_racks.rack_code,
+        shelf_columns_racks.column_number,
+        COALESCE(box_types.spaces_qty, boxes.qty_spaces, 0) AS spaces_qty
+      ")
+      .joins("join boxes on boxes.id = service_orders_exit_returns_boxes.box_id")
+      .joins("join box_types on box_types.id = boxes.box_type_id")
+      .joins("LEFT JOIN space_numbers_boxes on space_numbers_boxes.box_id = service_orders_exit_returns_boxes.box_id")
+      .joins("LEFT JOIN space_numbers on space_numbers.id = space_numbers_boxes.space_number_id")
+      .joins("LEFT JOIN shelf_columns_racks on shelf_columns_racks.id = space_numbers.shelf_columns_rack_id")
+      .joins("LEFT JOIN discarded_box_numbers ON discarded_box_numbers.box_id = boxes.id")
+      .joins("join service_orders_exit_returns on service_orders_exit_returns.id = service_orders_exit_returns_boxes.service_orders_exit_return_id")
+      .where("service_orders_exit_returns_boxes.service_orders_exit_return_id = ?", params[:service_orders_exit_return_id])
+      .group("service_orders_exit_returns_boxes.id, shelf_columns_racks.shelf_number, shelf_columns_racks.rack_code, shelf_columns_racks.column_number, service_orders_exit_returns.id, box_types.id, boxes.id")
+      .order("MIN(space_numbers.space_number)")
+    elsif params[:exit_return_type] == 'document'
+      exit_return = ServiceOrdersExitReturnsDocument.select("
+        service_orders_exit_returns_documents.id,
+        service_orders_exit_returns_documents.service_orders_exit_return_id,
+        service_orders_exit_returns.exit_return_type,
+        service_orders_exit_returns.service_type,
+        service_orders_exit_returns.deadline,
+        documents.id as document_id,
+        documents.document_name,
+        documents.initial_number,
+        documents.final_number,
+        documents.start_date,
+        documents.end_date,
+        documents.status,
+        service_orders_exit_returns.exit_return_type,
+        array_agg(space_numbers.space_number) as space_ids,
+        array_agg(DISTINCT discarded_box_numbers.number) AS this_discarded_numbers,
+        shelf_columns_racks.shelf_number,
+        shelf_columns_racks.rack_code,
+        shelf_columns_racks.column_number
+      ")
+      .joins("join documents on documents.id = service_orders_exit_returns_documents.document_id")
+      .joins("LEFT JOIN space_numbers_boxes on space_numbers_boxes.box_id = documents.box_id")
+      .joins("LEFT JOIN space_numbers on space_numbers.id = space_numbers_boxes.space_number_id")
+      .joins("LEFT JOIN shelf_columns_racks on shelf_columns_racks.id = space_numbers.shelf_columns_rack_id")
+      .joins("LEFT JOIN discarded_box_numbers ON discarded_box_numbers.box_id = documents.box_id")
+      .joins("join service_orders_exit_returns on service_orders_exit_returns.id = service_orders_exit_returns_documents.service_orders_exit_return_id")
+      .where("service_orders_exit_returns_documents.service_orders_exit_return_id = ?", params[:service_orders_exit_return_id])
+      .group("service_orders_exit_returns_documents.id, shelf_columns_racks.shelf_number, shelf_columns_racks.rack_code, shelf_columns_racks.column_number, documents.id, service_orders_exit_returns.id")
+      .order("MIN(space_numbers.space_number)")
+    end
+
+    render json: exit_return
+  end
+
+  def services
+    services = ServiceOrdersService.select("
+      services.id,
+      services.name,
+      service_orders_services.value,
+      service_orders_services.quantity,
+      service_orders_services.total_value  
+    ")
+    .joins("LEFT JOIN services ON services.id = service_orders_services.service_id")
+    .where("service_orders_services.service_order_id = ?", @service_order.id)
+    .order("services.order")
+
+    render json: services, status: :ok
+  end
+
+  def get_service_orders_services
+    contract_services = Service.select("
+      COALESCE(
+        service_orders_services.value,
+        client_contracts_services.value,
+        services.value
+      ) as value,
+      services.name,
+      services.id as id,
+      service_orders_services.quantity,
+      service_orders_services.total_value,
+      service_orders_services.id as service_orders_service_id
+    ")
+    .joins("
+      left join (
+        select client_contracts_services.service_id, client_contracts_services.value from client_contracts
+        join client_contracts_services on client_contracts_services.client_contract_id = client_contracts.id
+        where client_contracts.client_id = #{params[:client_id]})
+      client_contracts_services ON client_contracts_services.service_id = services.id")
+    .joins("
+      left join (
+        select service_orders_services.value, service_orders_services.service_id, service_orders_services.quantity, service_orders_services.total_value, service_orders_services.id from service_orders
+        join service_orders_services on service_orders_services.service_order_id = service_orders.id
+        where service_orders.id = #{params[:service_order_id]})
+      service_orders_services ON service_orders_services.service_id = services.id")
+    .where("services.active IS TRUE")
+    .where("services.is_default IS NOT TRUE")
+    .order("service_orders_services.id, services.order")
+
+    render json: contract_services
+  end
+
+  # def get_total_value_service
+  #   total_value_service = ServiceOrdersService.select("sum(service_orders_services.total_value) as total_value_service")
+  #   .joins("left join services ON services.id = service_orders_services.service_id")
+  #   .joins("left join service_orders ON service_orders.id = service_orders_services.service_order_id")
+  #   .joins("left join client_contracts_services ON client_contracts_services.id = services.id")
+  #   .joins("left join client_contracts ON client_contracts.id = client_contracts_services.client_contract_id")
+  #   .where("service_orders.id = 144") 
+
+  #   render json: total_value_service
+  # end
+
+  def get_arqcen_users
+    arqcen_users = User.select("
+      users.id,
+      users.name,
+      users.email
+    ")
+    .where(arqcen_user: true)
+    .order(:name)
+
+    render json: arqcen_users
+  end
+
+  def client_boxes
+    client_boxes = Box.select("
+      boxes.id,
+      boxes.initial_number,
+      boxes.final_number,
+      boxes.initial_text,
+      boxes.final_text,
+      boxes.start_date,
+      boxes.end_date,
+      boxes.status,
+      box_types.name as box_type_name,
+      array_agg(space_numbers.space_number order by space_numbers.space_number) as box_numbers,
+      shelf_columns_racks.shelf_number,
+      shelf_columns_racks.rack_code,
+      shelf_columns_racks.column_number,
+      shelf_columns_racks.qty_spaces
+    ")
+    .joins("join space_numbers_boxes on space_numbers_boxes.box_id = boxes.id")
+    .joins("join space_numbers on space_numbers.id = space_numbers_boxes.space_number_id")
+    .joins("join shelf_columns_racks on shelf_columns_racks.id = space_numbers.shelf_columns_rack_id")
+    .joins("join box_types on box_types.id = boxes.box_type_id")
+    .where("boxes.client_id = ? and boxes.status != 'discarded'", params[:client_id])
+
+    client_boxes = client_boxes.where("concat_ws(' ', box_types.name, space_numbers.space_number, shelf_columns_racks.rack_code, shelf_columns_racks.column_number, shelf_columns_racks.shelf_number, boxes.initial_number, boxes.final_number, boxes.start_date, boxes.end_date) ILIKE ?", "%#{params[:search]}%") if params[:search].present?
+    client_boxes = client_boxes.where("box_types.id = ?",     params[:box_type_id])    if params[:box_type_id].present?
+    client_boxes = client_boxes.where("shelf_columns_racks.column_number = ?",   params[:column_number])  if params[:column_number].present?
+    client_boxes = client_boxes.where("shelf_columns_racks.rack_code = ?",       params[:rack_code].upcase)      if params[:rack_code].present?
+    client_boxes = client_boxes.where("shelf_columns_racks.shelf_number = ?",    params[:shelf_number])   if params[:shelf_number].present?
+
+    if params[:initial_number].present? && params[:final_number].present?
+      initial = params[:initial_number].to_i
+      final = params[:final_number].to_i
+      client_boxes = client_boxes.where("
+        ((boxes.initial_number <= ?)
+        AND (boxes.final_number >= ? OR boxes.final_number >= ?))
+        OR ((boxes.initial_number >= ?)
+        AND (boxes.final_number <= ? OR boxes.initial_number <= ?))
+      ", initial, initial, final, initial, final, final)
+    elsif params[:initial_number].present? && !params[:final_number].present?
+      client_boxes = client_boxes.where("boxes.final_number >= ?", params[:initial_number].to_i)
+    elsif !params[:initial_number].present? && params[:final_number].present?
+      client_boxes = client_boxes.where("boxes.initial_number <= ?", params[:final_number].to_i)
+    end
+
+    if params[:start_date].present? && params[:end_date].present?
+      initial = Date.parse(params[:start_date]).strftime("%Y-%m-%d")
+      final = Date.parse(params[:end_date]).strftime("%Y-%m-%d")
+      client_boxes = client_boxes.where("
+        ((boxes.start_date <= ?)
+        AND (boxes.end_date >= ? OR boxes.end_date >= ?))
+        OR ((boxes.start_date >= ?)
+        AND (boxes.end_date <= ? OR boxes.start_date <= ?))
+      ", initial, initial, final, initial, final, final)
+    elsif params[:start_date].present? && !params[:end_date].present?
+      client_boxes = client_boxes.where("boxes.end_date >= ?", Date.parse(params[:start_date]).strftime("%Y-%m-%d"))
+    elsif !params[:start_date].present? && params[:end_date].present?
+      client_boxes = client_boxes.where("boxes.start_date <= ?", Date.parse(params[:end_date]).strftime("%Y-%m-%d"))
+    end
+
+    if params[:box_numbers].present?
+      box_numbers = Box.select("boxes.id")
+      .joins("join space_numbers_boxes on space_numbers_boxes.box_id = boxes.id")
+      .joins("join space_numbers on space_numbers.id = space_numbers_boxes.space_number_id")
+      .where(space_numbers: {space_number: params[:box_numbers]})
+
+      client_boxes = client_boxes.where("boxes.id in (#{box_numbers.to_sql})") if params[:box_numbers].delete_if{|e| e == ""}.present?
+    end
+
+    if params[:service_action].present?
+      client_boxes = client_boxes.where("boxes.status = 'sent'") if params[:service_action] == 'return'
+      client_boxes = client_boxes.where("boxes.status = 'stored'") if params[:service_action] == 'exit'
+    end
+
+    if params[:statuses].present?
+      if params[:statuses].count > 0
+        statuses_array = JSON.dump(params[:statuses]).tr("\"", "").tr("[", "{").tr("]", "}")
+        client_boxes = client_boxes.where("boxes.status = ANY(?)", statuses_array)
+      end
+    end
+
+    if params[:description].present?
+      client_boxes = client_boxes.where("concat_ws(' ', boxes.description_one, boxes.description_two, boxes.description_three) ILIKE ?", "%#{params[:description]}%")
+    end
+
+    params[:order] = "box_numbers" unless params[:order].present?
+    client_boxes = client_boxes.order(params[:order])
+    .page(params[:page]).per(params[:per_page])
+
+    total_pages = client_boxes.total_pages
+
+    client_boxes = client_boxes.group("boxes.id, box_types.name, shelf_columns_racks.id")
+
+    render json: { client_boxes: client_boxes, total_pages: total_pages }
+  end
+
+  def client_documents
+    client_documents = Document.select("
+      documents.id,
+      documents.document_name,
+      documents.initial_number,
+      documents.final_number,
+      documents.initial_text,
+      documents.final_text,
+      documents.start_date,
+      documents.end_date,
+      documents.status,
+      box_types.name as box_type_name,
+      array_agg(space_numbers.space_number order by space_numbers.space_number) as box_numbers,
+      shelf_columns_racks.shelf_number,
+      shelf_columns_racks.rack_code,
+      shelf_columns_racks.column_number,
+      shelf_columns_racks.qty_spaces
+    ")
+    .joins("join boxes on boxes.id = documents.box_id")
+    .joins("join box_types on box_types.id = boxes.box_type_id")
+    .joins("join space_numbers_boxes on space_numbers_boxes.box_id = boxes.id")
+    .joins("join space_numbers on space_numbers.id = space_numbers_boxes.space_number_id")
+    .joins("join shelf_columns_racks on shelf_columns_racks.id = space_numbers.shelf_columns_rack_id")
+    .where("boxes.client_id = ?", params[:client_id])
+
+    client_documents = client_documents.where("concat_ws(' ', documents.document_name, space_numbers.space_number, shelf_columns_racks.rack_code, shelf_columns_racks.column_number, shelf_columns_racks.shelf_number, documents.initial_number, documents.final_number, documents.start_date, documents.end_date) ILIKE ?", "%#{params[:search]}%") if params[:search].present?
+    client_documents = client_documents.where("box_types.id = ?",     params[:box_type_id])    if params[:box_type_id].present?
+    client_documents = client_documents.where("shelf_columns_racks.column_number = ?",   params[:column_number])  if params[:column_number].present?
+    client_documents = client_documents.where("shelf_columns_racks.rack_code = ?",       params[:rack_code].upcase)      if params[:rack_code].present?
+    client_documents = client_documents.where("shelf_columns_racks.shelf_number = ?",    params[:shelf_number])   if params[:shelf_number].present?
+
+    if params[:initial_number].present? && params[:final_number].present?
+      initial = params[:initial_number].to_i
+      final = params[:final_number].to_i
+      client_documents = client_documents.where("
+        ((documents.initial_number <= ?)
+        AND (documents.final_number >= ? OR documents.final_number >= ?))
+        OR ((documents.initial_number >= ?)
+        AND (documents.final_number <= ? OR documents.initial_number <= ?))
+      ", initial, initial, final, initial, final, final)
+    elsif params[:initial_number].present? && !params[:final_number].present?
+      client_documents = client_documents.where("documents.final_number >= ?", params[:initial_number].to_i)
+    elsif !params[:initial_number].present? && params[:final_number].present?
+      client_documents = client_documents.where("documents.initial_number <= ?", params[:final_number].to_i)
+    end
+
+    if params[:start_date].present? && params[:end_date].present?
+      initial = Date.parse(params[:start_date]).strftime("%Y-%m-%d")
+      final = Date.parse(params[:end_date]).strftime("%Y-%m-%d")
+      client_documents = client_documents.where("
+        ((documents.start_date <= ?)
+        AND (documents.end_date >= ? OR documents.end_date >= ?))
+        OR ((documents.start_date >= ?)
+        AND (documents.end_date <= ? OR documents.start_date <= ?))
+      ", initial, initial, final, initial, final, final)
+    elsif params[:start_date].present? && !params[:end_date].present?
+      client_documents = client_documents.where("documents.end_date >= ?", Date.parse(params[:start_date]).strftime("%Y-%m-%d"))
+    elsif !params[:start_date].present? && params[:end_date].present?
+      client_documents = client_documents.where("documents.start_date <= ?", Date.parse(params[:end_date]).strftime("%Y-%m-%d"))
+    end
+
+    if params[:box_numbers].present?
+      box_numbers = Document.select("documents.id")
+      .joins("join boxes on boxes.id = documents.box_id")
+      .joins("join space_numbers_boxes on space_numbers_boxes.box_id = boxes.id")
+      .joins("join space_numbers on space_numbers.id = space_numbers_boxes.space_number_id")
+      .where(space_numbers: {space_number: params[:box_numbers]})
+
+      client_documents = client_documents.where("documents.id in (#{box_numbers.to_sql})") if params[:box_numbers].delete_if{|e| e == ""}.present?
+    end
+
+    if params[:service_action].present?
+      client_documents = client_documents.where("documents.status = 'sent'") if params[:service_action] == 'return'
+      client_documents = client_documents.where("documents.status = 'stored'") if params[:service_action] == 'exit'
+    end
+
+    if params[:statuses].present?
+      if params[:statuses].count > 0
+        statuses_array = JSON.dump(params[:statuses]).tr("\"", "").tr("[", "{").tr("]", "}")
+        client_documents = client_documents.where("boxes.status = ANY(?)", statuses_array)
+      end
+    end
+
+    if params[:description].present?
+      client_documents = client_documents.where("concat_ws(' ', documents.description_one, documents.description_two, documents.description_three) ILIKE ?", "%#{params[:description]}%")
+    end
+
+    params[:order] = "box_numbers" unless params[:order].present?
+    client_documents = client_documents.order(params[:order])
+    .page(params[:page]).per(params[:per_page])
+
+    total_pages = client_documents.total_pages
+
+    client_documents = client_documents.group("documents.id, shelf_columns_racks.id, box_types.name")
+
+    render json: { client_documents: client_documents, total_pages: total_pages }
+  end
+
+  def grouped_by
+    @service_orders = ServiceOrder.grouped_by(params)
+    render json: @service_orders[:json], status: @service_orders[:status]
+  end
+
+  def find_clients
+    if params[:client_name].present?
+      client = Client.select("clients.*")
+      .where("clients.active is true and clients.name ILIKE ?", "%#{params[:client_name]}%")
+      .order("clients.name")
+      .limit(30)
+    else
+      client = Client.select("clients.*")
+      .where("clients.active is true")
+      .order("clients.name")
+      .limit(30)
+    end
+
+    render json: client
+  end
+
+  def get_implantation
+
+    if params[:implantation_type] == 'box'
+
+      implantation = ServiceOrdersImplantation.select("
+        users.name as user_name,
+        boxes.id as box_id,
+        boxes.status,
+        service_orders_implantations.id,
+        service_orders_implantations.implantation_type,
+        service_orders_implantations.created_at,
+        array_agg(DISTINCT space_numbers.space_number) as space_ids,
+        array_agg(DISTINCT discarded_box_numbers.number) AS this_discarded_numbers,
+        shelf_columns_racks.shelf_number,
+        shelf_columns_racks.column_number,
+        shelf_columns_racks.rack_code,
+        box_types.name as box_type
+      ")
+      .joins("join users on users.id = service_orders_implantations.user_id")
+      .joins("join boxes on boxes.id = service_orders_implantations.box_id")
+      .joins("left join box_types on box_types.id = boxes.box_type_id")
+      .joins("left join space_numbers_boxes on space_numbers_boxes.box_id = boxes.id")
+      .joins("left join space_numbers on space_numbers.id = space_numbers_boxes.space_number_id")
+      .joins("left join shelf_columns_racks on shelf_columns_racks.id = space_numbers.shelf_columns_rack_id")
+      .joins("LEFT JOIN discarded_box_numbers ON discarded_box_numbers.box_id = boxes.id")
+      .where("service_orders_implantations.service_order_id = ? and service_orders_implantations.id = ?", @service_order.id, params[:implantation_id])
+      .group("service_orders_implantations.id, shelf_columns_racks.id, users.id, box_types.id, boxes.id")
+
+    elsif params[:implantation_type] == 'document'
+
+      implantation = ServiceOrdersImplantation.select("
+        users.name as user_name,
+        documents.id as document_id,
+        documents.document_name,
+        documents.status,
+        documents.box_id,
+        service_orders_implantations.id,
+        service_orders_implantations.implantation_type,
+        service_orders_implantations.created_at,
+        array_agg(space_numbers.space_number) as space_ids,
+        array_agg(DISTINCT discarded_box_numbers.number) AS this_discarded_numbers,
+        shelf_columns_racks.shelf_number,
+        shelf_columns_racks.column_number,
+        shelf_columns_racks.rack_code
+      ")
+      .joins("join users on users.id = service_orders_implantations.user_id")
+      .joins("join documents on documents.id = service_orders_implantations.document_id")
+      .joins("left join boxes on boxes.id = documents.box_id")
+      .joins("left join space_numbers_boxes on space_numbers_boxes.box_id = boxes.id")
+      .joins("left join space_numbers on space_numbers.id = space_numbers_boxes.space_number_id")
+      .joins("left join shelf_columns_racks on shelf_columns_racks.id = space_numbers.shelf_columns_rack_id")
+      .joins("LEFT JOIN discarded_box_numbers ON discarded_box_numbers.box_id = boxes.id")
+      .where("service_orders_implantations.service_order_id = ? and service_orders_implantations.id = ?", @service_order.id, params[:implantation_id])
+      .group("service_orders_implantations.id, shelf_columns_racks.id, users.id, documents.id")
+
+    end
+
+    render json: implantation
+  end
+
+  def get_edited_changes
+    # edited_changes = Audit.select("audits.*")
+    # .where("
+    #   audits.auditable_id = ?
+    #     AND auditable_type = ?
+    #     AND audits.associated_id = ?
+    #     AND audits.associated_type = 'ServiceOrder'
+    #     AND audits.action = 'update'
+    #   ", params[:edited_type_id], params[:type], @service_order.id)
+
+    edited_changes = ServiceOrdersEdited.select("
+      service_orders_editeds.*,
+      audits.audited_changes
+    ")
+      .where(id: params[:edit_id])
+      .joins("LEFT JOIN audits ON audits.id = service_orders_editeds.audit_id")
+
+    render json: edited_changes
+  end
+
+  def get_deleted
+
+    if params[:deleted_type] == 'box'
+
+      deleted = ServiceOrdersDeleted.select("
+        users.name as user_name,
+        boxes.id as box_id,
+        boxes.initial_number,
+        boxes.final_number,
+        boxes.start_date,
+        boxes.end_date,
+        service_orders_deleteds.id,
+        service_orders_deleteds.deleted_type,
+        service_orders_deleteds.created_at,
+        box_types.name as box_type,
+        COALESCE(box_types.spaces_qty, boxes.qty_spaces, 0) AS spaces,
+        array_agg(DISTINCT discarded_box_numbers.number) AS this_discarded_numbers
+      ")
+      .joins("join users on users.id = service_orders_deleteds.user_id")
+      .joins("LEFT JOIN service_orders_deleteds_boxes on service_orders_deleteds_boxes.service_orders_deleted_id = service_orders_deleteds.id")
+      .joins("LEFT JOIN boxes on boxes.id = service_orders_deleteds_boxes.box_id")
+      .joins("left join box_types on box_types.id = boxes.box_type_id")
+      .joins("LEFT JOIN discarded_box_numbers ON discarded_box_numbers.box_id = boxes.id")
+      .where("service_orders_deleteds.service_order_id = ? and service_orders_deleteds.id = ?", @service_order.id, params[:deleted_id])
+      .group("service_orders_deleteds.id, users.id, box_types.id, boxes.id")
+
+    elsif params[:deleted_type] == 'document'
+
+      deleted = ServiceOrdersDeleted.select("
+        users.name as user_name,
+        documents.id as document_id,
+        documents.document_name,
+        documents.initial_number,
+        documents.final_number,
+        documents.start_date,
+        documents.end_date,
+        documents.box_id,
+        service_orders_deleteds.id,
+        service_orders_deleteds.deleted_type,
+        service_orders_deleteds.created_at,
+        array_agg(DISTINCT discarded_box_numbers.number) AS this_discarded_numbers
+      ")
+      .joins("join users on users.id = service_orders_deleteds.user_id")
+      .joins("join service_orders_deleteds_documents on service_orders_deleteds_documents.service_orders_deleted_id = service_orders_deleteds.id")
+      .joins("join documents on documents.id = service_orders_deleteds_documents.document_id")
+      .joins("LEFT JOIN boxes ON boxes.id = documents.box_id")
+      .joins("LEFT JOIN discarded_box_numbers ON discarded_box_numbers.box_id = boxes.id")
+      .where("service_orders_deleteds.service_order_id = ? and service_orders_deleteds.id = ?", @service_order.id, params[:deleted_id])
+      .group("service_orders_deleteds.id, users.id, documents.id")
+
+    end
+
+    render json: deleted
+  end
+
+  def delete_box_and_document
+    if params[:deleted_type] == 'box' && params[:all_selected] == true 
+      service_order = ServiceOrder.find(params[:id])
+      if service_order.status != ("canceled" && "completed" && "billed")
+        hash_params = {
+          deleted_type: params[:deleted_type],
+          service_order_id: params[:id],
+          user_id: current_user.id
+        }
+
+        filter_params = params[:filter_params]
+        removed_at = params[:removed_at]
+        unselect_ids = params[:unselect_ids]
+        filter_ids = Box.get_paginated_filtered_ordered(filter_params).pluck(:id)
+        box_ids = filter_ids - unselect_ids
+
+        hash_params[:box_ids] = box_ids
+        qty_actions = box_ids.count
+
+        deleted = ServiceOrdersDeleted.new(hash_params)
+        if deleted.save
+          ServiceOrdersAction.create!(
+            service_order_id: params[:id],
+            action_id: deleted.id,
+            user_id: current_user.id,
+            action_type: 'deleted',
+            box_document: params[:deleted_type],
+            qty_actions: qty_actions
+          )
+        end
+        DeleteBoxJob.perform_later(box_ids, removed_at)  
+      end
+
+    else
+      render json: ServiceOrder.delete_box_and_document(params, current_user)
+    end
+
+  end
+
+  def xlsx_export
+    # form_params = JSON.parse(params[:form])
+    # raise params.inspect
+
+    # p = Axlsx::Package.new
+    # wb = p.workbook
+    # wb.add_worksheet(name: "Your worksheet name") do |sheet|
+    #   sheet.add_row ["BATATA", "Second", "Third"]
+    #   sheet.add_row [1, 2, 3]
+    # end
+
+    send_data ServiceOrder.xlsx_export(params), type: "application/xlsx", filename: "Ordens_de_Servico.xlsx"
+  end
+
+  def pdf
+    # begin
+      require 'combine_pdf'
+      require_relative '../../lib/pdf/service_order_pdf'
+
+      filter = JSON.parse(params[:filter])
+
+      client = @service_order.client
+      requester = @service_order.requester
+
+      # EXIT RETUN BOXES
+      exit_boxes = {}
+      return_boxes = {}
+      exit_documents = {}
+      return_documents = {}
+
+      if filter['exit_and_return'].present?
+        exit_boxes = @service_order.get_exit_or_return_boxes('exit')
+        return_boxes = @service_order.get_exit_or_return_boxes('return')
+
+        # EXIT AND RETURN DOCUMENTS
+        exit_documents = @service_order.get_exit_or_return_documents('exit')
+        return_documents = @service_order.get_exit_or_return_documents('return')
+      end
+
+      # BOX IMPLANTATIONS
+      box_implantations = {}
+      document_implantations = {}
+      if filter['implantation'].present?
+        box_implantations = @service_order.get_box_implantations()
+        document_implantations = @service_order.get_document_implantations()
+      end
+
+
+      # Edições de Caixas/Documentos
+      boxes_edits = {}
+      documents_edits = {}
+
+      if filter['edition'].present?
+        boxes_edits = @service_order.get_edited_boxes()
+        documents_edits = @service_order.get_edited_documents()
+      end
+
+      # Excluções de Caixas/Documentos
+      discarded_documents = {}
+      discarded_boxes = {}
+
+      if filter['exclusion'].present?
+        discarded_boxes = @service_order.discarded_boxes()
+        discarded_documents = @service_order.discarded_documents()
+      end
+
+      # USED SERVICES
+      services = @service_order.get_used_services(client.id)
+
+      services_total = 0.0
+      services.each{ |service| services_total += service.total_value }
+
+      # COMMENTS
+      comments = []
+      if filter['conversation'].present?
+        comments = @service_order.service_orders_comments
+      end
+
+
+      # PDF GENERATOR
+      merged_pdf = CombinePDF.new
+      quantity = params[:times] || 1
+      pdf = ServiceOrderPDF.generate({
+        filter: filter,
+        service_order: @service_order,
+        client: client,
+        requester: requester,
+        return_boxes: return_boxes,
+        exit_boxes: exit_boxes,
+        exit_documents: exit_documents,
+        return_documents: return_documents,
+        box_implantations: box_implantations,
+        document_implantations: document_implantations,
+        services: services,
+        services_total: services_total,
+        boxes_edits: boxes_edits,
+        documents_edits: documents_edits,
+        discarded_boxes: discarded_boxes,
+        discarded_documents: discarded_documents,
+        comments: comments,
+        current_user: current_user,
+        client_user: current_user.client_user_find(client.id)
+      })
+      quantity.to_i.times do
+        merged_pdf << CombinePDF.parse(pdf)
+      end
+      send_data(merged_pdf.to_pdf, filename: "OS-#{@service_order.id}.pdf", disposition: "attachment", type: 'application/pdf')
+
+    # rescue StandardError => e
+    #   render json: {error: e.message}, status: :unprocessable_entity
+    # end
+  end
+
+  def get_service_orders_actions
+    service_orders_actions = ServiceOrdersAction.select("service_orders_actions.*, users.name as user_name")
+    .joins("join users on users.id = service_orders_actions.user_id")
+    .where("service_orders_actions.service_order_id = ?", @service_order.id)
+    .order("service_orders_actions.id DESC")
+    .page(params[:page])
+    .per(15)
+
+    total_pages = service_orders_actions.total_pages
+
+    render json: {
+      actions: service_orders_actions,
+      total_pages: total_pages
+    }
+  end
+
+  def delete_service_order_action
+    if @service_order.status != ("canceled" && "completed" && "billed")
+      service_orders_action = ServiceOrdersAction.find(params[:action_id])
+      service_orders_exit_return = ServiceOrdersExitReturn.find(params[:exit_return_id])
+
+      if service_orders_exit_return.exit_return_type == 'box'
+        items = service_orders_exit_return.boxes
+      elsif service_orders_exit_return.exit_return_type == 'document'
+        items = service_orders_exit_return.documents
+      end
+
+      items.each do |item|
+        if params[:action_type] == "exit"
+          item.update_columns(status: "stored")
+        elsif params[:action_type] == "return"
+          item.update_columns(status: "sent")
+        end
+      end
+
+      service_orders_action.destroy
+      service_orders_exit_return.destroy
+    end
+  end
+
+  def delete_exit_return_box_document
+    if @service_order.status != ("canceled" && "completed" && "billed")
+      service_orders_action = ServiceOrdersAction.find(params[:action_id])
+
+      if params[:exit_return_type] == "box"
+        item = ServiceOrdersExitReturnsBox.find(params[:exit_return_box_document_id]).box
+        ServiceOrdersExitReturnsBox.find(params[:exit_return_box_document_id]).destroy
+      elsif params[:exit_return_type] == "document"
+        item = ServiceOrdersExitReturnsDocument.find(params[:exit_return_box_document_id]).document
+        ServiceOrdersExitReturnsDocument.find(params[:exit_return_box_document_id]).destroy
+      end
+
+      if params[:action_type] == "exit"
+        item.update_columns(status: "stored")
+      elsif params[:action_type] == "return"
+        item.update_columns(status: "sent")
+      end
+
+      service_orders_action.update_columns(qty_actions: service_orders_action.qty_actions - 1)
+
+      if service_orders_action.qty_actions == 0
+        service_orders_action.destroy
+        ServiceOrdersExitReturn.find(params[:exit_return_id]).destroy
+      end
+    end
+  end
+
+  def return_service_order_box
+    render json: ServiceOrder.return_service_order_box(params)
+  end
+
+  def action_boxes
+    require_relative '../../lib/xlsx/service_order_boxes'
+    begin
+      boxes = ServiceOrdersAction.boxes(@service_order.id, params[:type])
+      send_data ServiceOrderBoxesToXlsx.export(boxes), type: "application/xlsx", filename: "Caixas.xlsx"
+    rescue StandardError => e
+      render json: { error: e }, status: :unprocessable_entity
+    end
+  end
+
+  def action_documents
+    require_relative '../../lib/xlsx/service_order_documents'
+    begin
+      documents = ServiceOrdersAction.documents(@service_order.id, params[:type])
+      send_data ServiceOrderDocumentsToXlsx.export(documents), type: 'application/xlsx', filename: 'Documentos.xlsx'
+    rescue StandardError => e
+      render json: { error: e }, status: :unprocessable_entity
+    end
+  end
+
+  private
+    # Use callbacks to share common setup or constraints between actions.
+    def set_service_order
+      @service_order = ServiceOrder.find(params[:id])
+    end
+
+    def service_orders_box_params
+      params.fetch(:service_orders_box, {}).permit(:service_type)
+    end
+
+    def service_orders_comment_params
+      params.fetch(:service_orders_comment, {}).permit(:comment)
+    end
+
+    def service_orders_service_params
+      params.fetch(:service_orders_service, {}).permit(:service_id, :service_order_id, :name, :quantity, :value, :total_value)
+    end
+
+    # Only allow a trusted parameter "white list" through.
+    def service_order_params
+      params.fetch(:service_order, {}).permit(:pre_service_order_reference, :total_value, :note, :completion_date, :created_at, :cancel_date, :cancel_reason, :status, :comment, :requester_id, :responsible_id, :client_id, :department_id, :sub_company_id, :reopen_service_order, :title, :description, :request_form, attachments: [], service_ids: [],requester_phones: [], requester_emails: [], follower_emails: [])
+    end
+
+    def filter_user_clients
+      return if current_user.arqcen_user
+
+      unless params[:client_id].present?
+        params[:client_id] = current_user.active_clients_ids
+      end
+
+      params[:current_user_id] = current_user.id
+    end
+
+    def client_user_can_see
+      return if current_user.arqcen_user
+
+      client_ids = current_user.active_clients_ids
+      raise CanCan::AccessDenied unless client_ids.include?(@service_order.client_id)
+    end
+end

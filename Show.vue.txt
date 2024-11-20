@@ -1,0 +1,1871 @@
+<template>
+  <section class="page-wrapper" style="min-height: 284px;" v-if="service_order">
+    <b-modal title="Atualizando OS" hide-footer v-model="loading_status">
+      <div class="text-center" :style="`font-size: 40px`">
+        <!-- {{ $t('loading') }} -->
+        <font-awesome-icon icon="sync" spin />
+      </div>
+    </b-modal>
+
+    <b-modal
+      size="lg"
+      centered
+      ref="service_order_description_modal"
+      title="Descrição"
+      v-model="openServiceOrderDescriptionModal"
+      body-class="description-modal"
+    >
+      <wysiwyg v-model="service_order_description" :config="config" v-show="editOSDescription" />
+      <div v-html="service_order.description || 'N/A'" v-show="!editOSDescription"></div>
+
+      <template slot="modal-footer">
+        <b-button
+          variant="default"
+          @click="$refs.service_order_description_modal.hide()"
+        >{{ $t('close') }}</b-button>
+
+        <b-button
+          variant="primary"
+          @click="updateServiceOrderDescription"
+          v-show="editOSDescription"
+        >{{ $t('update') }}</b-button>
+        <b-button
+          variant="primary"
+          v-show="!editOSDescription"
+          @click="editOSDescription = !editOSDescription"
+        >{{ $t('edit') }}</b-button>
+      </template>
+    </b-modal>
+
+    <b-modal
+      size="lg"
+      centered
+      v-if="service_order.client && service_order.client.client_addresses  && service_order.client.client_addresses.length > 0"
+      id="client_address-modal"
+      :title="`Endereços (${service_order.client.client_addresses.length})`"
+      ok-only
+      ok-title="Fechar"
+    >
+      <b-table
+        striped
+        hover
+        :items="service_order.client.client_addresses"
+        :fields="clientAddressFields"
+        responsive
+      >
+        <template
+          slot="main_address"
+          slot-scope="row"
+        >{{ row.item.main_address === true ? 'Sim' : 'Não'}}</template>
+      </b-table>
+    </b-modal>
+    <b-modal
+      centered
+      v-if="service_order.requester_phones && service_order.requester_phones.length >= 1"
+      id="phones-modal"
+      :title="`Telefones (${service_order.requester_phones.length})`"
+      ok-only
+      ok-title="Fechar"
+    >
+      <b-table
+        striped
+        hover
+        :items="service_order.requester_phones"
+        :fields="requesterPhoneFields"
+        responsive
+      >
+        <template slot="number" slot-scope="phone">
+          <span>{{ phone.item | formatPhone }}</span>
+        </template>
+      </b-table>
+    </b-modal>
+    <b-modal
+      centered
+      v-if="service_order.requester_emails && service_order.requester_emails.length >= 1"
+      id="email-modal"
+      :title="`Emails (${service_order.requester_emails.length})`"
+      ok-only
+      ok-title="Fechar"
+    >
+      <b-table
+        striped
+        hover
+        :items="service_order.requester_emails"
+        :fields="requesterEmailFields"
+        responsive
+      >
+        <template slot="email" slot-scope="row">
+          <span>{{ row.item }}</span>
+        </template>
+      </b-table>
+    </b-modal>
+
+    <div class="row page-titles fixed-header">
+      <div class="col-md-6 align-self-center">
+        <div class="d-flex justify-content-start align-items-center">
+          <ol class="breadcrumb">
+            <li class="breadcrumb-item">
+              <router-link to="/service_orders/">
+                <span v-if="service_order">{{$t('service_orders.self')}}</span>
+              </router-link>
+            </li>
+            <li
+              class="breadcrumb-item active d-inline-block text-truncate breadcrumb-max-width"
+              id="service_order_title"
+            >#{{service_order.id}} - {{service_order.title}}</li>
+            <li class="breadcrumb-item active">
+              <b-popover
+                target="service_order_title"
+                placement="rightbottom"
+                triggers="hover focus"
+              >#{{service_order.id}} - {{service_order.title}}</b-popover>
+              <span
+                style="position: absolute;margin-top: 1px;height: 22px;line-height: 15px;"
+                :class="`label label-table ${boxStatusClass[service_order.status]}` "
+              >
+                {{$t(`service_orders.status_types.${service_order.status}`)}}
+                <span>{{ renderDiffTime(service_order.completion_date, service_order.cancel_date, service_order.created_at) }}</span>
+              </span>
+            </li>
+          </ol>
+        </div>
+      </div>
+      <div class="col-md-6 align-self-center">
+        <div class="d-flex justify-content-end">
+          <div class="button-group">
+            <b-btn
+              :disabled="loadStartAttendance"
+              v-show="hasRole('manage_work_orders') && service_order.status == 'pending'"
+              v-if="service_order.status == 'pending'"
+              @click="startAttendance"
+              class="text-left"
+              variant="info"
+              size="sm"
+            >
+              <font-awesome-icon v-if="loadStartAttendance" icon="sync" spin />
+              {{$t('service_orders.start_attendance')}}
+            </b-btn>
+
+            <b-dropdown
+              size="sm"
+              variant="info"
+              v-if="hasRole('manage_work_orders') && service_order.status != 'pending' && service_order.status != 'completed'  && service_order.status != 'canceled' &&service_order.status != 'billed'"
+              right
+            >
+              <template v-slot:button-content>
+                <font-awesome-icon icon="file-alt" class="mr-1" />Ações do Documento
+              </template>
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'SelectDocumentToEdit'}"
+              >{{ $t(`documents.edit`) }}</router-link>
+
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'SelectDocumentsToDelete'}"
+              >{{$t('service_orders.delete')}}</router-link>
+
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'ServiceOrdersDocumentImplantation', params: {type: 'document'}}"
+              >{{$t('service_orders.implantation')}}</router-link>
+
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'BatchDocumentsImplantation'}"
+              >{{$t('service_orders.batch_implantation')}}</router-link>
+
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'ServiceOrdersDocumentExitAndReturn', params: {type: 'document', action: 'return'}}"
+              >{{$t('service_orders.return')}}</router-link>
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'ServiceOrdersDocumentExitAndReturn', params: {type: 'document', action: 'exit'}}"
+              >{{$t('service_orders.exit')}}</router-link>
+            </b-dropdown>
+
+            <b-dropdown
+              size="sm"
+              variant="info"
+              v-if="hasRole('manage_work_orders') && service_order.status != 'pending' && service_order.status != 'completed'  && service_order.status != 'canceled' &&service_order.status != 'billed'"
+            >
+              <template v-slot:button-content>
+                <font-awesome-icon icon="box" class="mr-1" />Ações da Caixa
+              </template>
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'SelectBoxToEdit'}"
+              >{{ $t(`service_orders.edit_box`) }}</router-link>
+
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'SelectBoxesToDelete'}"
+              >{{$t('service_orders.delete')}}</router-link>
+
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'ServiceOrdersBoxImplantation', params: {type: 'box'}}"
+              >{{$t('service_orders.implantation')}}</router-link>
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'ServiceOrdersBoxExitAndReturn', params: {type: 'box', action: 'return'}}"
+              >{{$t('service_orders.return')}}</router-link>
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'ServiceOrdersBoxExitAndReturn', params: {type: 'box', action: 'exit'}}"
+              >{{$t('service_orders.exit')}}</router-link>
+
+              <router-link
+                v-if="service_order.status != 'completed' && service_order.status != 'canceled' && service_order.status != 'billed'"
+                tag="a"
+                class="dropdown-item"
+                :to="{name: 'BatchEditBoxes'}"
+              >{{ $t(`batch_edit_boxes.short`) }}</router-link>
+            </b-dropdown>
+            <b-btn
+              v-if="hasRole('manage_work_orders') && hasRole('see_work_orders')"
+              size="sm"
+              right
+              variant="default"
+              :disabled="this.loadingPDF"
+              @click="openExportPDFModal"
+            >
+              <font-awesome-icon icon="file-pdf" v-show="!this.loadingPDF" />
+              <span role="status" class="spinner-border text-default" v-show="this.loadingPDF"></span>
+              {{ $t('service_orders.export_pdf') }}
+              <!-- <b-dropdown-item @click="exportPDF(1)">1 Via</b-dropdown-item>
+              <b-dropdown-item @click="exportPDF(2)">2 Vias</b-dropdown-item>-->
+            </b-btn>
+
+            <b-btn
+              size="sm"
+              variant="primary"
+              @click="reOpenServiceOrder"
+              v-if="hasRole('manage_work_orders') && checkForShow('reopen')"
+            >
+              <font-awesome-icon icon="undo"></font-awesome-icon>
+              {{$t('service_orders.reopen')}}
+            </b-btn>
+            <b-btn
+              size="sm"
+              variant="danger"
+              @click="openCancelReason"
+              v-if="hasRole('manage_work_orders') && checkForShow('cancel')"
+            >{{$t('cancel')}}</b-btn>
+
+            <b-btn
+              v-show="service_order.status != 'pending'"
+              variant="primary"
+              size="sm"
+              @click="openFinishConfirm"
+              v-if="hasRole('manage_work_orders') && checkForShow('finish')"
+            >
+              <font-awesome-icon icon="check"></font-awesome-icon>
+              {{$t('service_orders.finish')}}
+            </b-btn>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row first-os-row">
+      <b-col md="12">
+        <b-btn block class="mb-2" @click="showFirstRow = !showFirstRow" variant="info">
+          <font-awesome-icon :icon="showFirstRow ? 'minus' : 'plus'" />
+          {{ showFirstRow ? 'Ocultar' : 'Exibir'}} Blocos Informativos
+        </b-btn>
+      </b-col>
+
+      <b-col md="4" v-if="showFirstRow">
+        <b-card no-body class="w-100">
+          <b-card-body class="p-b-0" style="height: 341px;">
+            <b-row>
+              <div class="col-12">
+                <div>
+                  <b-row>
+                    <b-col md="12">
+                      <b-form-group label-for="inputNewClient">
+                        <label class="card-title d-block">
+                          <font-awesome-icon icon="briefcase" />
+                          {{$t('clients.self')}}
+                          <b-btn
+                            v-b-modal.client_address-modal
+                            style="position: absolute; right: 0px; top: -3px"
+                            size="sm"
+                            variant="link"
+                            v-if="service_order.client && service_order.client.client_addresses  && service_order.client.client_addresses.length > 0"
+                          >
+                            <font-awesome-icon icon="home" />
+                            Endereços
+                            ({{ service_order.client.client_addresses.length }})
+                          </b-btn>
+                        </label>
+                        <h6 class="text-truncate" id="client_name">
+                          <router-link
+                            :to="{ name: 'clientShow', params: {id: service_order.client_id}}"
+                            target="_blank"
+                          >{{service_order.client && service_order.client.name}}</router-link>
+                        </h6>
+
+                        <b-popover
+                          target="client_name"
+                          placement="top"
+                          triggers="hover focus"
+                        >{{service_order.client && service_order.client.name}}</b-popover>
+                      </b-form-group>
+                    </b-col>
+                    <b-col md="12">
+                      <b-form-group id="inputNewClient" label-for="inputNewClient">
+                        <label class="card-title">
+                          <font-awesome-icon icon="gopuram" />
+                          {{$t('clients.sub_company')}}
+                        </label>
+                        <h6
+                          id="sub_company"
+                          class="text-truncate"
+                        >{{ (service_order.sub_company && service_order.sub_company.name) || 'N/A'}}</h6>
+                        <b-popover
+                          target="sub_company"
+                          placement="top"
+                          triggers="hover focus"
+                        >{{ (service_order.sub_company && service_order.sub_company.name) || 'N/A'}}</b-popover>
+                      </b-form-group>
+                    </b-col>
+                  </b-row>
+                  <b-row>
+                    <b-col md="12">
+                      <b-form-group id="inputNewClient" label-for="inputNewClient">
+                        <label class="card-title">
+                          <font-awesome-icon icon="tag" />
+                          {{$t('departments.self')}}
+                        </label>
+                        <h6>{{ (service_order.department && service_order.department.name) || 'N/A'}}</h6>
+                      </b-form-group>
+                    </b-col>
+                    <b-col md="12">
+                      <b-form-group>
+                        <label class="card-title">
+                          <font-awesome-icon icon="person-booth" />
+                          {{ $t('service_orders.request_form') }}
+                        </label>
+                        <h6>
+                          {{ $t( `service_orders.${service_order.request_form}` ) }}
+                          <span
+                            v-if="service_order.request_form == 'others'"
+                          >{{ `(${service_order.request_form})`}}</span>
+                        </h6>
+                      </b-form-group>
+                    </b-col>
+                    <b-col cols="12">
+                      <b-form-group style="margin-bottom: 0px">
+                        <label class="card-title">
+                          <font-awesome-icon icon="calendar-alt" />
+                          {{$t('service_orders.created_at')}}
+                        </label>
+                        <h6>{{ service_order.created_at | formatDateAndHour }}</h6>
+                      </b-form-group>
+                    </b-col>
+                    <b-col cols="12">
+                      <b-form-group style="margin-bottom: 0px">
+                        <label class="card-title">
+                          <font-awesome-icon icon="calendar-alt" />
+                          {{$t('finalizado em')}}
+                        </label>
+                        <h6>{{service_order.completion_date | formatDateAndHour}}</h6>
+                      </b-form-group>
+                      <b-btn
+                        v-if="serviceOrderIsEditable"
+                        style="position: absolute; right: 10px; top: -3px"
+                        variant="primary"
+                        size="sm"
+                        class="float-right"
+                        @click="$refs.change_client_component.showModal(ownership)"
+                      >{{ $t('change_ownership') }}</b-btn>
+                    </b-col>          
+                  </b-row>
+                </div>
+              </div>
+            </b-row>
+          </b-card-body>
+        </b-card>
+      </b-col>
+      <b-col md="4" class="p-l-0 p-r-0" v-if="showFirstRow">
+        <b-card no-body>
+          <b-card-body style="height: 341px" class="p-r-0">
+            <b-row>
+              <b-col>
+                <b-form-group>
+                  <label
+                    class="card-title cursor-pointer"
+                    @click="openServiceOrderDescriptionModal = !openServiceOrderDescriptionModal"
+                  >
+                    <font-awesome-icon icon="edit" />
+                    {{ $t('service_orders.description') }}
+                  </label>
+                  <div
+                    style="max-height: 190px; overflow: auto"
+                    v-html="service_order.description || 'N/A'"
+                  ></div>
+                </b-form-group>
+              </b-col>
+              <b-col md="12">
+                <b-form-group style="margin-bottom: 0px">
+                  <label class="card-title d-block cursor-pointer" @click="openNoteModal">
+                    <font-awesome-icon icon="edit" />
+                    {{$t('observation')}}
+                  </label>
+                  <div
+                    style="max-height: 50px; overflow: auto"
+                    class="white-space-preline"
+                  >{{ service_order.note || 'N/A'}}</div>
+                </b-form-group>
+              </b-col>
+            </b-row>
+          </b-card-body>
+        </b-card>
+      </b-col>
+      <b-col md="4" v-if="showFirstRow">
+        <b-card no-body style="margin-bottom: 10px">
+          <b-card-body style="height: 132px;">
+            <b-row>
+              <div class="col-12">
+                <b-row>
+                  <b-col>
+                    <ConfirmModal
+                      ref="confirm_update_date"
+                      :title-message="$t('action_ask')"
+                      :message="$t('update_date', {date: $moment(editCompletionDate).format('DD/MM/YYYY')})"
+                      :okTitle="$t('update')"
+                      @execute="createdDateChanged()"
+                    />
+                    <b-form-group v-if="service_order.requester">
+                      <label class="card-title">
+                        <font-awesome-icon icon="user" />
+                        {{$t('service_orders.requester')}}
+                      </label>
+                      <h6
+                        class="m-b-0"
+                      >{{service_order.requester.name}} ({{service_order.requester.email}})</h6>
+                    </b-form-group>
+                    <div class="d-block">
+                      <b-btn
+                        variant="link"
+                        v-b-modal.email-modal
+                        v-if="service_order.requester_emails && service_order.requester_emails.length > 1"
+                        size="sm"
+                      >
+                        <font-awesome-icon icon="envelope" />
+                        Emails({{ service_order.requester_emails.length }})
+                      </b-btn>
+                      <b-btn
+                        variant="link"
+                        v-b-modal.phones-modal
+                        v-if="service_order.requester_phones && service_order.requester_phones.length >= 1"
+                        class="ml-1"
+                        size="sm"
+                      >
+                        <font-awesome-icon icon="phone" />
+                        Fones({{ service_order.requester_phones.length }})
+                      </b-btn>
+                    </div>
+                  </b-col>
+                </b-row>
+              </div>
+            </b-row>
+          </b-card-body>
+        </b-card>
+
+        <b-card v-bind:class="{ 'h-214': service_order.status !== 'completed' }">
+          <b-row>
+            <div class="col-md-12">
+              <b-form-group>
+                <h4 class="card-title">
+                  <font-awesome-icon icon="headset" />
+                  {{$t('service_orders.responsible')}}
+                </h4>
+                <model-list-select
+                  v-on:input="confirmUpdateResponsible"
+                  class="model-select responsible-select"
+                  :list="get_arqcen_users"
+                  optionValue="id"
+                  optionText="name"
+                  v-model="responsible_id"
+                  :placeholder="$t('service_orders.select_responsible')"
+                ></model-list-select>
+                <b-row>
+                  <b-col>
+                    <h6
+                      style="text-transform: initial; margin-top: 10px"
+                      v-if="service_order.responsible"
+                    >({{service_order.responsible.email}})</h6>
+                  </b-col>
+                </b-row>
+              </b-form-group>
+            </div>
+            <b-col v-if="service_order.status === 'completed'">
+              <label class="card-title d-block m-b-0">
+                {{ $t('service_orders.date_of_the_conclusion') }}
+                <date-picker
+                  v-on:input="confirmUpdateDate"
+                  id="completion_date"
+                  v-model="completion_date_2"
+                  type="date"
+                  lang="pt-br"
+                  format="DD/MM/YYYY"
+                  class="w-100"
+                  @change="createdDateChanged"
+                ></date-picker>
+              </label>
+            </b-col>
+          </b-row>
+        </b-card>
+      </b-col>
+    </div>
+    <div class="row">
+      <b-col md="12">
+        <b-card v-if="service_order.status != 'pending'">
+          <b-row>
+            <div class="col-12">
+              <b-row>
+                <b-col>
+                  <b-button-group style="flex: auto;width: 100%;">
+                    <b-button
+                      class="w-50"
+                      :class="tab == 'general' ? 'btn-primary' : 'btn-default'"
+                      @click="setTab('general')"
+                    >
+                      <font-awesome-icon icon="info" />
+                      {{ $t('service_orders.general') }}
+                    </b-button>
+
+                    <b-button
+                      class="w-50"
+                      :class="tab == 'attachments' ? 'btn-primary' : 'btn-default'"
+                      @click="setTab('attachments')"
+                    >
+                      <font-awesome-icon icon="paperclip" />
+                      {{ $t('service_orders.attachments') }}
+                    </b-button>
+                    <b-button
+                      class="w-50"
+                      :class="tab == 'logs' ? 'btn-primary' : 'btn-default'"
+                      @click="setTab('logs')"
+                    >
+                      <font-awesome-icon icon="stream" />
+                      {{ $t('service_orders.logs') }}
+                    </b-button>
+                  </b-button-group>
+                </b-col>
+              </b-row>
+
+              <b-row>
+                <b-col>
+                  <div v-if="tab === 'general'">
+                    <br />
+                    <b-row>
+                      <b-col
+                        md="7"
+                        class="mb-3"
+                        v-if="this.service_order.status != 'pending' && this.service_order.status != 'completed' && this.service_order.status != 'canceled' && this.service_order.status != 'billed'"
+                      >
+                        <div>
+                          <wysiwyg v-model="comment" :config="config" />
+                        </div>
+                        <b-row class="mt-2">
+                          <b-col>
+                            <b-btn
+                              block
+                              :disabled="checkCommentDisabled()"
+                              @click="sendComment('processing')"
+                              variant="primary"
+                            >Enviar / Em Processamento</b-btn>
+                          </b-col>
+                          <b-col>
+                            <b-btn
+                              block
+                              :disabled="checkCommentDisabled()"
+                              @click="sendComment('awaiting_client')"
+                              variant="primary"
+                            >Enviar / Aguardando Retorno</b-btn>
+                          </b-col>
+                        </b-row>
+                      </b-col>
+                      <b-col md="5">
+                        <div class="profiletimeline service-table">
+                          <div
+                            class="sl-item"
+                            v-for="comment in service_order.service_orders_comments"
+                            :key="comment.id"
+                          >
+                            <div class="sl-left" v-if="comment.user">
+                              <img
+                                v-if="!comment.user.image_url"
+                                src="@/assets/images/default-user-img.jpg"
+                                alt="user"
+                                class="img-circle"
+                              />
+                              <img
+                                v-if="comment.user.image_url"
+                                :src="comment.user.image_url"
+                                alt="user"
+                                class="img-circle"
+                              />
+                            </div>
+                            <div class="sl-right" v-if="comment.user">
+                              <div>
+                                <h4>{{comment.user.name}}</h4>
+                                <p>
+                                  <small class="text-muted">
+                                    <font-awesome-icon icon="clock" />
+                                    {{comment.created_at | formatDateAndHour}}
+                                  </small>
+                                </p>
+                              </div>
+                              <div>
+                                <p v-html="comment.comment"></p>
+                              </div>
+                            </div>
+                          </div>
+                          <div style="font-size:18px">
+                            <font-awesome-icon icon="paperclip" />
+                            {{ $t('service_orders.attachments') }}
+                          </div>
+                          <br />
+                          <b-col
+                            v-for="file in get_attachments"
+                            v-bind:key="file.id"
+                            md="3"
+                            class="mb-2"
+                            align-self="center"
+                          >
+                            <div v-if="!isImage(file.name)" style="height: 106px;">
+                              <font-awesome-icon icon="file" size="5x"></font-awesome-icon>
+                            </div>
+                            <b-img
+                              v-if="isImage(file.name)"
+                              thumbnail
+                              style="height: 100px;"
+                              :src="file.image"
+                              :alt="file.name"
+                              class="mb-2 d-block justify-content-center"
+                            ></b-img>
+                            <p class="text-truncate" style="font-size:12px">{{ file.name }}</p>
+                            <div class="d-flex justify-content-right">
+                              <b-btn
+                                size="sm"
+                                variant="danger"
+                                @click="removeFile(file)"
+                                v-if="service_order.status !=  ('canceled' && 'completed' && 'billed')"
+                              >
+                                <font-awesome-icon icon="trash"></font-awesome-icon>
+                                {{ $t('delete') }}
+                              </b-btn>
+                              <b-btn
+                                size="sm"
+                                variant="primary"
+                                @click="downloadFile(file)"
+                                class="ml-2"
+                              >
+                                <font-awesome-icon icon="cloud"></font-awesome-icon>
+                                {{ $t('download')}}
+                              </b-btn>
+                            </div>
+                          </b-col>
+                        </div>
+                        <div v-if="service_order.service_orders_comments">
+                          <b-row v-if="service_order.service_orders_comments.length > 0">
+                            <b-col class="text-center">
+                              <b-btn
+                                @click="showComments"
+                                variant="link"
+                              >{{$t('service_orders.show_talk')}}</b-btn>
+                            </b-col>
+                          </b-row>
+                        </div>
+                      </b-col>
+                    </b-row>
+                    <br />
+                    <b-row>
+                      <b-col>
+                        <b-row>
+                          <b-col md="7">
+                            <b-row>
+                              <b-col align-self="start" md="8">
+                                <h4 class="card-title">{{ $t('service_orders.services') }}</h4>
+                                <div>
+                                  <strong class="font-weight-bold">{{showAllValue() | formatMoney}}</strong>
+                                </div>
+                              </b-col>
+                              <b-col
+                                align-self="end"
+                                class="text-right"
+                                v-if="!checkEditableTableDisabled()"
+                              >
+                                <b-btn
+                                  @click="reloadServiceOrderServices"
+                                  variant="default"
+                                  size="sm"
+                                  style="margin-top: -20px; margin-right: 10px"
+                                >{{ $t('cancel') }}</b-btn>
+                                <b-btn
+                                  @click="updateAllServiceOrdersServices"
+                                  variant="primary"
+                                  size="sm"
+                                  style="margin-top: -20px;"
+                                >
+                                  <font-awesome-icon icon="check"></font-awesome-icon>
+                                  {{ $t('save') }}
+                                </b-btn>
+                              </b-col>
+                            </b-row>
+                            <div class="service-table">
+                              <b-table
+                                show-empty
+                                :empty-text="$t('service_orders.service_empty')"
+                                striped
+                                hover
+                                :items="service_order_services"
+                                :fields="serviceFields"
+                                :disable="checkEditableTableDisabled()"
+                                :table-title="$t('service_orders.services')"
+                                responsive
+                                ref="serviceTable"
+                              >
+                                <template slot="name" scope="row">{{row.item.name}}</template>
+
+                                <template slot="quantity" scope="row">
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    style="max-width: 80px"
+                                    class="form-control form-control-sm"
+                                    v-bind:value="(row.item.quantity || 0)"
+                                    v-on:blur="row.item.quantity =  ($event.target.value  || 0)"
+                                  />
+                                </template>
+
+                                <template
+                                  slot="value"
+                                  scope="row"
+                                >{{(row.item.value || "0") | formatMoney}}</template>
+
+                                <template
+                                  slot="total_value"
+                                  scope="row"
+                                >{{(row.item.total_value || "0") | formatMoney}}</template>
+
+                                <template slot="selected" scope="row">
+                                  <div v-if="row.item.service_orders_service_id">
+                                    <font-awesome-icon icon="check" class="text-success" />
+                                  </div>
+                                  <div
+                                    v-if="!row.item.service_orders_service_id && row.item.quantity"
+                                  >
+                                    <font-awesome-icon
+                                      icon="exclamation-circle"
+                                      class="text-warning"
+                                    />
+                                  </div>
+                                </template>
+                                <template slot="actions" scope="row">
+                                  <span
+                                    v-if="row.item.service_orders_service_id"
+                                    class="text-danger cursor-pointer"
+                                    @click="removeServiceOrderItem(row.item, row.index)"
+                                    style="float: right; width: 20px; height: 20px; text-align: center"
+                                  >
+                                    <font-awesome-icon icon="times" />
+                                  </span>
+                                </template>
+                              </b-table>
+                            </div>
+                          </b-col>
+                          <b-col>
+                            <ActionsTable v-if="service_order.status != 'pending'" />
+                          </b-col>
+                        </b-row>
+                      </b-col>
+                    </b-row>
+                  </div>
+                  <div v-if="tab === 'attachments'">
+                    <b-row>
+                      <b-col md="12">
+                        <br />
+                        <b-row class="mb-2">
+                          <b-col
+                            v-for="file in get_attachments"
+                            v-bind:key="file.id"
+                            md="3"
+                            class="mb-2"
+                            align-self="center"
+                          >
+                            <div v-if="!isImage(file.name)" style="height: 106px;">
+                              <font-awesome-icon icon="file" size="5x"></font-awesome-icon>
+                            </div>
+                            <b-img
+                              v-if="isImage(file.name)"
+                              thumbnail
+                              style="height: 100px;"
+                              :src="file.image"
+                              :alt="file.name"
+                              class="mb-2 d-block justify-content-center"
+                            ></b-img>
+                            <p class="text-truncate" style="font-size:12px">{{ file.name }}</p>
+
+                            <b-btn
+                              size="sm"
+                              variant="danger"
+                              @click="removeFile(file)"
+                              v-if="service_order.status !=  ('canceled' && 'completed' && 'billed')"
+                            >
+                              <font-awesome-icon icon="trash"></font-awesome-icon>
+                              {{ $t('delete') }}
+                            </b-btn>
+                            <b-btn
+                              size="sm"
+                              variant="primary"
+                              @click="downloadFile(file)"
+                              class="ml-2"
+                            >
+                              <font-awesome-icon icon="cloud"></font-awesome-icon>
+                              {{ $t('download')}}
+                            </b-btn>
+                          </b-col>
+                        </b-row>
+                        <b-form-group>
+                          <b-btn
+                            v-if="file"
+                            @click="clearAttachment"
+                            variant="link"
+                          >{{ $t('clear') }}</b-btn>
+                          <b-form-file
+                            ref="file-input"
+                            id="document_attachment"
+                            v-model="file"
+                            multiple
+                            :placeholder="$t('images.choose')"
+                            :browse-text="$t('browse')"
+                            @change="sendingEvent"
+                          ></b-form-file>
+                        </b-form-group>
+                      </b-col>
+                    </b-row>
+                  </div>
+                  <b-row v-if="tab === 'logs'">
+                    <b-col md="12">
+                      <br />
+
+                       <NewLogTable :audits="audits_records || []"/>
+                  
+                    </b-col>
+                  </b-row>
+                </b-col>
+              </b-row>
+            </div>
+          </b-row>
+        </b-card>
+        <div class="card w-100" v-if="service_order.status == 'pending' ">
+          <div class="card-body">
+            <div class="col-md-12 text-center">
+              <h4 class="card-title">
+                <font-awesome-icon icon="info-circle" class="mr-1" />Inicie o Atendimento para Manipular a OS
+              </h4>
+              <b-btn
+                :disabled="loadStartAttendance"
+                v-show="service_order.status == 'pending'"
+                v-if="service_order.status == 'pending'"
+                @click="startAttendance"
+                variant="info"
+                size="md"
+              >
+                <font-awesome-icon v-if="loadStartAttendance" icon="sync" spin />
+                {{$t('service_orders.start_attendance')}}
+              </b-btn>
+            </div>
+          </div>
+        </div>
+      </b-col>
+    </div>
+    <FinishConfirm
+      :service_orders_services="get_service_orders_services"
+      :loading_status="loading_status"
+      ref="finish_confirm_modal"
+      @execute="updateStatus"
+    />
+    <ReOpenService @execute="updateStatus" ref="reopen_service_order_modal" />
+    <CancelReason @execute="updateStatus" ref="cancel_reason_modal" />
+    <ShowComments
+      ref="show_comments_modal"
+      :description="service_order.description"
+      :comments="service_order.service_orders_comments"
+    />
+
+    <ShowExportOS ref="show_export_os" />
+    <ShowServiceOrderNote ref="show_note_modal" />
+    <ConfirmModal
+      ref="confirm_update_responsible"
+      :title-message="$t('action_ask')"
+      :message="$t('service_orders.update_responsible')"
+      :okTitle="$t('update')"
+      @execute="updateResponsible()"
+    />
+    <ChangeClientRelatedData
+      ref="change_client_component"
+      :titleMessage="this.$t('change_ownership')"
+      @execute="changeClientRelatedData"
+    />
+  </section>
+</template>
+<script>
+import { mapGetters } from "vuex";
+import { mapActions } from "vuex";
+import ShowExportOS from "./ShowExportOSModal";
+import ShowServiceOrderNote from "./ShowServiceOrderNoteModal";
+import ShowComments from "./ShowCommentsModal";
+import CancelReason from "./CancelReasonModal";
+import ReOpenService from "./ReOpenServiceModal";
+import FinishConfirm from "./FinishConfirmModal";
+import ActionsTable from "@/components/ServiceOrders/ActionsTable";
+import ChangeClientRelatedData from "@/components/ServiceOrders/ChangeClientRelatedData";
+import { ModelListSelect } from "vue-search-select";
+import moment from "moment";
+import ConfirmModal from "@/components/ConfirmModal.vue";
+import LogRow from "@/components/Logs/LogRow";
+import LogJs from "@/helpers/log";
+import NewLogTable from "@/components/Logs/NewLogTable";
+
+export default {
+  name: "ServiceOrdersShow",
+  props: ["id"],
+  data() {
+    return {
+       logFields: [
+        
+      ],
+      loadStartAttendance: false,
+      loading_status: false,
+      showFirstRow: false,
+      editOSDescription: false,
+      file: "",
+      form: [],
+      services: [],
+      total_value: "",
+      ownership: {},
+      config: {
+        content_style: "body { font-size: 12px; }",
+        height: 200,
+        language: "pt_BR",
+        theme: "modern",
+        fontsize_formats:
+          "8px 10px 12px 14px 16px 18px 20px 22px 24px 26px 39px 34px 38px 42px 48px",
+        plugins:
+          "print preview fullpage searchreplace autolink image textcolor paste",
+        toolbar1:
+          "formatselect fontsizeselect | bold italic strikethrough forecolor backcolor link image paste",
+        paste_data_images: true
+      },
+      create_and_update_fields: {
+        end_date: "service_orders.service_orders_log.end_date",
+        start_date: "service_orders.service_orders_log.start_date",
+        qty_spaces: "service_orders.service_orders_log.qty_spaces",
+        delete_information:
+          "service_orders.service_orders_log.delete_information",
+        to_eliminate: "service_orders.service_orders_log.to_eliminate",
+        description_one: "service_orders.service_orders_log.description_one",
+        description_two: "service_orders.service_orders_log.description_two",
+        description_three:
+          "service_orders.service_orders_log.description_three",
+        status: "service_orders.service_orders_log.status",
+        responsible_name: "service_orders.service_orders_log.responsible_name",
+        title: "service_orders.service_orders_log.title",
+        client_name: "service_orders.service_orders_log.client_name",
+        cancel_reason: "service_orders.service_orders_log.cancel_reason",
+        sub_company_name: "service_orders.service_orders_log.sub_company_name",
+        requester_name: "service_orders.service_orders_log.requester_name",
+        requester_emails: "service_orders.requester_emails",
+        altered_department:
+          "service_orders.service_orders_log.altered_department",
+        name_department: "service_orders.service_orders_log.name_department",
+        altered_sub_company:
+          "service_orders.service_orders_log.altered_sub_company",
+        service_name: "service_orders.service_orders_log.service_name",
+        quantity: "service_orders.service_orders_log.quantity",
+        total_value: "service_orders.service_orders_log.total_value",
+        attachment_name: "service_orders.service_orders_log.attachment_name"
+      },
+      openServiceOrderDescriptionModal: false,
+      loadingPDF: false,
+      servicesValues: {},
+      boxStatusClass: {
+        completed: "label-success",
+        awaiting_client: "label-info",
+        awaiting_processing: "label-primary",
+        processing: "label-orange",
+        canceled: "label-danger",
+        pending: "label-warning",
+        billed: "label-success"
+      },
+      editServiceOrderDescription: "",
+      editResponsible: {
+        responsible_id: ""
+      },
+      editCompletionDate: "",
+
+      open_description: false,
+      select_type: "",
+      show_editable_table: false,
+      service_orders_services: {},
+      template_fields: [
+        {
+          name: "quantity",
+          placeholder: this.$t("service_orders.service_quantity"),
+          editable: true,
+          type: "input-number"
+        },
+        {
+          name: "value",
+          placeholder: this.$t("service_orders.service_value"),
+          type: "input-number",
+          editable: true,
+          price: true
+        },
+        {
+          name: "total_value",
+          placeholder: this.$t("service_orders.service_total_value"),
+          type: "input-number",
+          editable: false,
+          price: true
+        },
+        {
+          name: "actions",
+          type: "actions"
+        },
+        {
+          name: "selected",
+          placeholder: this.$t("service_orders.selected"),
+          type: "selected"
+        }
+      ],
+      myValue: "",
+      tab: "general",
+      dropzoneOptions: {
+        url: "https://httpbin.org/post",
+        thumbnailWidth: 150,
+        maxFilesize: 0.5,
+        addRemoveLinks: true,
+        dictDefaultMessage: this.$t("service_orders.new_attachments_message")
+      },
+
+      url: null,
+      attachments: [],
+      comment: "",
+      serviceFields: [
+        {
+          key: "selected",
+          label: ""
+          // thStyle: { width: "15px" }
+        },
+        {
+          key: "name",
+          label: this.$t("service_orders.service_name")
+          // thStyle: { width: "30%" }
+        },
+        {
+          key: "quantity",
+          label: this.$t("service_orders.service_quantity")
+          // thStyle: { width: "100px" }
+        },
+        {
+          key: "value",
+          label: this.$t("service_orders.service_value")
+          // thStyle: { width: "100px" }
+        },
+        {
+          key: "total_value",
+          label: this.$t("service_orders.service_total_value")
+          // thStyle: { width: "100px" }
+        },
+        {
+          key: "actions",
+          label: ""
+          // thStyle: { width: "100px" }
+        }
+      ],
+      clientAddressFields: [
+        {
+          key: "zip_code",
+          label: `${this.$t("addresses.zip_code")}`
+        },
+        {
+          key: "street",
+          label: `${this.$t("addresses.street")}`
+        },
+        {
+          key: "number",
+          label: `${this.$t("addresses.house_number")}`,
+          formatter: number => {
+            return number || "-";
+          }
+        },
+        {
+          key: "neighbourhood",
+          label: `${this.$t("addresses.neighbourhood")}`
+        },
+        {
+          key: "complement",
+          label: `${this.$t("addresses.complement")}`,
+          formatter: complement => {
+            return complement || "-";
+          }
+        },
+        {
+          key: "city",
+          label: `${this.$t("addresses.city")}`
+        },
+        {
+          key: "state",
+          label: `${this.$t("addresses.state")}`
+        },
+        {
+          key: "main_address",
+          label: this.$t("addresses.main_address")
+        },
+        {
+          key: "actions",
+          label: ""
+        }
+      ],
+      phoneWithNumber: [],
+      phones: [],
+      newPhone: {
+        number: ""
+      },
+      emailWithEmails: [],
+      emails: [],
+      newEmail: {
+        email: ""
+      },
+      requestFormOptions: [
+        {
+          disabled: true,
+          value: null,
+          text: this.$t("service_orders.select_request_form")
+        },
+        { value: "manual_email", text: this.$t("service_orders.manual_email") },
+        {
+          value: "visit_company",
+          text: this.$t("service_orders.visit_company")
+        },
+        { value: "others", text: this.$t("service_orders.others") }
+      ],
+      requesterPhoneFields: [
+        {
+          key: "number",
+          label: "Número"
+        },
+        {
+          key: "actions",
+          label: ""
+        }
+      ],
+      requesterEmailFields: [
+        {
+          key: "email",
+          label: "E-mail"
+        },
+        {
+          key: "actions",
+          label: "",
+          tdClass: "actions-header"
+        }
+      ]
+    };
+  },
+  mounted() {
+    this.getAttachments(this.$route.params["id"]).then(() => {
+      this.setAttachments();
+    });
+  },
+  computed: {
+    ...mapGetters([
+      "service_order",
+      "get_attachments",
+      "get_service_orders_audits",
+      "get_services_audits",
+      "get_service_orders_services",
+      "get_arqcen_users",
+      "current_user",
+      "get_service_orders_actions"
+    ]),
+    audits_records() {
+      let items =  (this.get_service_orders_audits || []).map(item => ({ ...item, audited_changes: this.sortObj(item.audited_changes)  }))
+      return items
+    },
+    service_order_services: {
+      get() {
+        let data = [];
+        this.$store.state.serviceOrders.get_service_orders_services.forEach(
+          item => {
+            data.push({ ...Object.assign({}, item) });
+          }
+        );
+        return data;
+      }
+    },
+    service_order_description: {
+      get() {
+        return (
+          this.$store.state.serviceOrders.service_order.description || "N/A"
+        );
+      },
+      set(value) {
+        this.editServiceOrderDescription = value;
+      }
+    },
+    responsible_id: {
+      get() {
+        return this.$store.state.serviceOrders.service_order.responsible_id;
+      },
+      set(value) {
+        this.editResponsible.responsible_id = value;
+      }
+    },
+    completion_date_2: {
+      get() {
+        return moment(
+          this.$store.state.serviceOrders.service_order.completion_date
+        ).utc();
+      },
+      set(value) {
+        this.editCompletionDate = moment(value).utc();
+      }
+    },
+    serviceOrderIsEditable() {
+      return ["awaiting_client", "awaiting_processing", "processing"].includes(
+        this.service_order.status
+      );
+    }
+  },
+  created() {
+    this.$store
+      .dispatch("getServiceOrder", this.$route.params["id"])
+      .then(() => {
+        this.setCurrentOwnership();
+        this.$store.dispatch("getArqcenUsers");
+        this.$store
+          .dispatch("getServiceOrdersServices", {
+            client_id: this.service_order.client_id,
+            service_order_id: this.service_order.id
+          })
+          .then(() => {
+            this.show_editable_table = true;
+          });
+      });
+  },
+  components: {
+    ShowExportOS,
+    ShowServiceOrderNote,
+    ModelListSelect,
+    ConfirmModal,
+    ShowComments,
+    CancelReason,
+    ReOpenService,
+    FinishConfirm,
+    ActionsTable,
+    ChangeClientRelatedData,
+    LogRow,
+    NewLogTable
+
+  },
+  methods: {
+    ...mapActions([
+      "deleteServiceOrdersService",
+      "updateServiceOrdersService",
+      "updateServiceOrdersServices",
+      "uploadAttachments",
+      "deleteAttachments",
+      "getAttachments",
+      "getServiceOrdersAudits",
+      "getServicesAudits",
+      "deleteService",
+      "saveComment",
+      "updateServiceOrder"
+    ]),
+    sortObj(obj) {
+      if(obj) {
+        // essa chave esta retornando EN talvez por conta disto o sorter sofra algum problema...,
+        // talvez se fosse jogado para um {name: ....,} fica mais facil de formatar
+        const sortObject = Object.keys(obj).sort().reduce((res, key) => (res[key] = obj[key], res), {});
+        return sortObject
+      } else {
+        return []
+      }
+    }, 
+    renderDiffTime(completion_date, cancel_date, created_at) {
+      let now = moment(new Date())
+        .utc()
+        .format("DD/MM/YYYY HH:mm");
+      let then = moment(created_at)
+        .utc()
+        .format("DD/MM/YYYY HH:mm");
+
+      if (completion_date) {
+        now = moment(completion_date)
+          .utc()
+          .format("DD/MM/YYYY HH:mm");
+      }
+
+      if (cancel_date) {
+        now = moment(cancel_date)
+          .utc()
+          .format("DD/MM/YYYY HH:mm");
+      }
+
+      let ms = moment(now, "DD/MM/YYYY HH:mm").diff(
+        moment(then, "DD/MM/YYYY HH:mm")
+      );
+      let d = moment.duration(ms);
+      let s = Math.floor(d.asDays()) + moment.utc(ms).format("[d] HH[h] mm[m]");
+
+      return s;
+    },
+    showAllValue() {
+      let total_value_service = this.service_order_services.reduce(
+        (sum, service) => {
+          return sum + service.total_value;
+        },
+        0
+      );
+      return total_value_service;
+    },
+    hasRole(roleName) {
+      return (
+        this.current_user &&
+        this.current_user.all_roles &&
+        this.current_user.all_roles.includes(roleName)
+      );
+    },
+    isImage(file) {
+      let type = "|" + file.split(".")[file.split(".").length - 1] + "|";
+      return "|jpg|png|jpeg|bmp|gif|".indexOf(type) != -1;
+    },
+    clearAttachment() {
+      this.$refs["file-input"].reset();
+      this.file = "";
+    },
+    removeServiceOrderItem(service, index) {
+      this.deleteServiceOrdersService({
+        id: this.service_order.id,
+        index: index,
+        service_orders_service_id: service.service_orders_service_id
+      }).then(response => {
+        this.$store.dispatch("getServiceOrdersServices", {
+          client_id: this.service_order.client_id,
+          service_order_id: this.service_order.id
+        });
+        this.$toasted.error(this.$t("service_orders.service_removed"));
+      });
+    },
+    confirmUpdateDate() {
+      this.$refs.confirm_update_date.showModal();
+    },
+    addPhone() {
+      if (this.newPhone && this.newPhone.number) {
+        // this.phoneWithNumber.push({ ...this.newPhone });
+        // this.phones = this.phoneWithNumber.map(phone => phone.number);
+        // this.phones = this.phones.concat(this.user.phones);
+        // this.form.requester_phones = this.phones;
+        // this.newPhone.number = "";
+      }
+    },
+    createdDateChanged() {
+      this.updateServiceOrder({
+        id: this.$route.params.id,
+        change_completion_date: true,
+        completion_date: this.editCompletionDate
+      }).then(() => {
+        this.$store.dispatch("getServiceOrder", this.$route.params["id"]);
+      });
+    },
+    removeServiceOrdersService(id, index) {
+      this.deleteServiceOrdersService({
+        id: this.service_order.id,
+        index: index,
+        service_orders_service_id: id
+      });
+    },
+    checkServiceOrdersService(id) {
+      this.updateServiceOrdersService({
+        id: this.service_order.id,
+        service_orders_service: { status: 1 },
+        service_orders_service_id: id
+      }).then(() => {
+        this.$store.dispatch("getServiceOrder", this.service_order.id);
+      });
+    },
+    formatPrice(value) {
+      if (value) {
+        let val = (value / 1).toFixed(2).replace(".", ",");
+        return val.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+      } else {
+        return "00,00";
+      }
+    },
+    formatNames(files) {
+      if (files.length === 1) {
+        return files[0].name;
+      } else {
+        return `${files.length} files selected`;
+      }
+    },
+    sendingEvent(e) {
+    const files = e.target.files;
+
+    // Verifica o status da service_order uma única vez, já que deve ser igual para todos os arquivos
+    const status = this.service_order.status;
+
+    // Função para fazer o upload de um único arquivo
+    const uploadFile = (file) => {
+      if (status === "pending") {
+        this.file = "";
+        this.$refs["file-input"].reset();
+        this.$toasted.error(this.$t("service_orders.start_attendance_required"));
+      } else if (
+        this.service_order.status === "canceled" ||
+        this.service_order.status === "completed" ||
+        this.service_order.status === "billed"
+      ) {
+        this.file = "";
+        this.$refs["file-input"].reset();
+        this.$toasted.error(this.$t("service_orders.is_closed_warning"));
+      } else {
+        this.uploadAttachments({
+        id: this.$route.params["id"],
+        attachments: file
+      }).then(() => {
+        this.file = "";
+        this.$refs["file-input"].reset();
+        this.$toasted.success("Arquivo Adicionado");
+      });
+    }
+  };
+
+    // Itera sobre todos os arquivos selecionados e faz o upload de cada um
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      uploadFile(file);
+    }
+  },
+    setAttachments() {
+      if (this.get_attachments) {
+        var attachments_arr = this.get_attachments;
+
+        for (var i = 0; i < this.get_attachments.length; i++) {
+          var file = {
+            id: attachments_arr[i].id,
+            size: attachments_arr[i].size,
+            name: attachments_arr[i].name,
+            type: "image/png"
+          };
+          var url = attachments_arr[i];
+          // this.$refs.myVueDropzone.manuallyAddFile(file, url.image);
+        }
+      }
+    },
+    downloadFile(file) {
+      window.open(file.image);
+    },
+    removeFile(file) {
+      if (file.id) {
+        this.deleteAttachments({
+          id: this.$route.params["id"],
+          attachment_id: file.id
+        }).then(() => {
+          this.$toasted.error("Arquivo Removido");
+        });
+      }
+    },
+    openAttachment() {},
+    setTab(tab) {
+      this.tab = tab;
+      switch (tab) {
+        case "attachments": {
+          this.getAttachments(this.$route.params["id"]).then(() => {
+            this.setAttachments();
+          });
+          break;
+        }
+        case "logs": {
+          this.getServiceOrdersAudits(this.$route.params["id"]).then(() => {});
+        }
+      }
+    },
+    sendComment(status) {
+      this.saveComment({ id: this.$route.params["id"], comment: this.comment })
+        .then(() => {
+          this.comment = "";
+          this.updateStatus(status);
+          this.$store.dispatch("getServiceOrder", this.$route.params["id"]);
+        })
+        .catch(() => {});
+    },
+    updateStatus(status, status_param) {
+      this.loading_status = true;
+      if (status == "canceled") {
+        this.updateServiceOrder({
+          id: this.$route.params.id,
+          status: status,
+          cancel_reason: status_param,
+          cancel_date: "present"
+        }).then(() => {
+          this.loading_status = false;
+          this.$store.dispatch("getServiceOrder", this.$route.params["id"]);
+          this.$toasted.error(this.$t("service_orders.canceled"));
+        });
+      } else if (status == "completed") {
+        this.updateServiceOrder({
+          id: this.$route.params.id,
+          status: status,
+          total_value: status_param,
+          completion_date: "present"
+        }).then(() => {
+          this.loading_status = false;
+          this.$store.dispatch("getServiceOrder", this.$route.params["id"]);
+          this.$toasted.success(this.$t("service_orders.completed"));
+        });
+      } else {
+        if (this.service_order.status === "completed") {
+          this.updateServiceOrder({
+            id: this.$route.params.id,
+            status: status,
+            reopen_service_order: status_param,
+            completion_date: ""
+          }).then(() => {
+            this.loading_status = false;
+            this.$store.dispatch("getServiceOrder", this.$route.params["id"]);
+            this.$toasted.success(this.$t("service_orders.updated"));
+          });
+        } else {
+          this.updateServiceOrder({
+            id: this.$route.params.id,
+            status: status
+          }).then(() => {
+            this.loading_status = false;
+            this.$store.dispatch("getServiceOrder", this.$route.params["id"]);
+            this.$toasted.success(this.$t("service_orders.updated"));
+          });
+        }
+      }
+    },
+    reloadServiceOrderServices() {
+      this.$store.dispatch("getServiceOrdersServices", {
+        client_id: this.service_order.client_id,
+        service_order_id: this.service_order.id
+      });
+    },
+    updateAllServiceOrdersServices() {
+      this.updateServiceOrdersServices({
+        id: this.service_order.id,
+        service_orders_services: this.service_order_services
+      }).then(() => {
+        this.$store.dispatch("getServiceOrdersServices", {
+          client_id: this.service_order.client_id,
+          service_order_id: this.service_order.id
+        });
+        this.$toasted.success(this.$t("service_orders.service_added"));
+      });
+    },
+    truncate(text, length) {
+      this.$options.filters.truncate(text, length);
+    },
+    showImplantation(row) {
+      this.$refs.show_implantation_modal.showModal(row);
+    },
+    openNoteModal() {
+      this.$refs.show_note_modal.showModal();
+    },
+    openExportPDFModal() {
+      this.$refs.show_export_os.showModal();
+    },
+    showEdited(row) {
+      this.$refs.show_edited_modal.showModal(row);
+    },
+    showDeleted(row) {
+      this.$refs.show_deleted_modal.showModal(row);
+    },
+    updateResponsible() {
+      this.updateServiceOrder({
+        id: this.service_order.id,
+        responsible_id: this.editResponsible.responsible_id
+      }).then(() => {
+        this.$store.dispatch("getServiceOrder", this.$route.params["id"]);
+        this.$toasted.success(this.$t("service_orders.updated"));
+      });
+    },
+    updateServiceOrderDescription() {
+      this.updateServiceOrder({
+        id: this.$route.params["id"],
+        description: this.editServiceOrderDescription
+      })
+        .then(() => {
+          this.$store.dispatch("getServiceOrder", this.$route.params["id"]);
+          this.$toasted.success(this.$t("service_orders.updated"));
+          this.editOSDescription = false;
+          this.$refs.service_order_description_modal.hide();
+        })
+        .catch(error => {
+          this.editOSDescription = false;
+          this.$refs.service_order_description_modal.hide();
+          switch (error.response.status) {
+            case 403:
+              this.$toasted.error(this.$t("no_right")).goAway(1500);
+              break;
+            case 0:
+              this.$toasted.error(this.$t("no_connection")).goAway(1500);
+              break;
+            case 422:
+              var { data } = error.response;
+              for (let key in data) {
+                for (let message_id in data[key]) {
+                  this.$toasted
+                    .error(this.$t(data[key][message_id]))
+                    .goAway(2500);
+                }
+              }
+              break;
+          }
+        });
+    },
+    confirmUpdateResponsible() {
+      if (
+        this.service_order.status != "completed" &&
+        this.service_order.status != "canceled" &&
+        this.service_order.status != "billed"
+      ) {
+        this.$refs.confirm_update_responsible.showModal();
+      } else {
+        this.$toasted.error(this.$t("service_orders.is_closed_warning"));
+      }
+    },
+    showComments() {
+      this.$refs.show_comments_modal.showModal();
+    },
+    startAttendance() {
+      this.loadStartAttendance = true;
+      this.updateServiceOrder({
+        id: this.$route.params["id"],
+        status: "processing",
+        responsible_id: this.current_user.id
+      }).then(() => {
+        this.loadStartAttendance = false;
+        this.$store.dispatch("getServiceOrder", this.$route.params["id"]);
+      });
+    },
+    checkCommentDisabled() {
+      if (
+        this.comment.length >= 69 &&
+        this.service_order.status != "pending" &&
+        this.service_order.status != "completed" &&
+        this.service_order.status != "canceled" &&
+        this.service_order.status != "billed"
+      ) {
+        return false;
+      } else {
+        return true;
+      }
+    },
+    checkEditableTableDisabled() {
+      if (
+        this.service_order.status != "pending" &&
+        this.service_order.status != "completed" &&
+        this.service_order.status != "canceled" &&
+        this.service_order.status != "billed"
+      ) {
+        return false;
+      } else {
+        return true;
+      }
+    },
+    openCancelReason() {
+      this.$refs.cancel_reason_modal.showModal();
+    },
+    checkForShow(type) {
+      let services = 0;
+      for (var i = 0; i < this.get_service_orders_services.length; i++) {
+        if (this.get_service_orders_services[i].quantity) {
+          services++;
+        }
+      }
+      if (this.get_service_orders_actions.length > 0) {
+        services++;
+      }
+      if (type == "cancel") {
+        if (
+          services == 0 &&
+          this.service_order.status != "completed" &&
+          this.service_order.status != "canceled" &&
+          this.service_order.status != "billed"
+        ) {
+          return true;
+        } else {
+          return false;
+        }
+      } else if (type == "finish") {
+        if (
+          services > 0 &&
+          this.service_order.status != "completed" &&
+          this.service_order.status != "canceled" &&
+          this.service_order.status != "billed"
+        ) {
+          return true;
+        } else {
+          return false;
+        }
+      } else if (type == "reopen") {
+        if (
+          this.service_order.status == "canceled" ||
+          this.service_order.status == "completed"
+        ) {
+          return true;
+        } else {
+          return false;
+        }
+      }
+    },
+    openFinishConfirm() {
+      this.updateServiceOrdersServices({
+        id: this.service_order.id,
+        service_orders_services: this.service_order_services
+      }).then(() => {
+        this.$store
+          .dispatch("getServiceOrdersServices", {
+            client_id: this.service_order.client_id,
+            service_order_id: this.service_order.id
+          })
+          .then(() => {
+            this.$refs.finish_confirm_modal.showModal();
+          });
+      });
+    },
+    reOpenServiceOrder() {
+      this.$refs.reopen_service_order_modal.showModal();
+    },
+    changeClientRelatedData(new_ownership) {
+      this.updateServiceOrder({
+        id: this.$route.params["id"],
+        sub_company_id: new_ownership.sub_company_id,
+        department_id: new_ownership.department_id
+      })
+        .then(() => {
+          this.$toasted.success(this.$t("service_orders.updated"));
+        })
+        .catch(() => {
+          this.$toasted.error(this.$t("service_orders.update_error"));
+        });
+    },
+    setCurrentOwnership() {
+      this.ownership = {
+        client: {
+          id: this.service_order.client.id,
+          name: this.service_order.client.name
+        }
+        // sub_company: {
+        //   id: this.service_order.sub_company.id,
+        //   name: this.service_order.sub_company.name
+        // }
+      };
+      if (this.service_order.sub_company_id) {
+        this.ownership["sub_company"] = {
+          id: this.service_order.sub_company.id,
+          name: this.service_order.sub_company.name
+        };
+      } else {
+        this.ownership["sub_company"] = null;
+      }
+
+      if (this.service_order.department_id) {
+        this.ownership["department"] = {
+          id: this.service_order.department.id,
+          name: this.service_order.department.name
+        };
+      } else {
+        this.ownership["department"] = null;
+      }
+      return this.ownership;
+    },
+    getKeyType(index) {
+      return LogJs.keyType(index);
+    },
+    showFields(index) {
+      return Object.keys(this.create_and_update_fields).includes(index);
+    }
+    // removelinebreaks(html) {
+    //   html = html.replace(/\r/g, "");
+    //   html = html.replace(/\n/g, chars);
+    //   return html;
+    // }
+  }
+};
+</script>
+<style>
+.card {
+  margin-bottom: 20px !important;
+}
+.modal-open .modal-body.description-modal {
+  max-height: 60vh;
+}
+.h-214 {
+  height: 188px;
+}
+.mce-notification {
+  display: none !important;
+}
+.breadcrumb-button {
+  cursor: default !important;
+}
+.breadcrumb-button:hover {
+  background-color: #fec107;
+  border-color: #fec107;
+}
+.breadcrumb-button:not(:disabled):not(.disabled):active {
+  color: white;
+  background-color: #fec107;
+  border-color: #fec107;
+}
+.breadcrumb-button:focus {
+  box-shadow: none;
+}
+.service-table {
+  max-height: 300px !important;
+  overflow-y: auto;
+}
+.custom-cursor {
+  cursor: pointer;
+}
+.responsible-select {
+  max-width: 60%;
+}
+</style>
